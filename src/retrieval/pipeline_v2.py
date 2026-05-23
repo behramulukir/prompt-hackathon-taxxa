@@ -7,19 +7,26 @@ Wires:
       → vector_retriever.retrieve (k=strategy.seed_k)
       → graph_expand.expand (BFS along strategy.edge_types)
       → fetch_chunks_for_sections (vector store)
-      → cross_encoder_rerank.score + combine_scores
+      → [rerank — see RerankMode below]
       → assemble.assemble (n)
       → generate.generate
       → AnswerResult
 
-Same shape as v1's ``Pipeline`` with one expansion step inserted and the
-metadata reranker replaced with the cross-encoder + weighted combine.
+Same shape as v1's ``Pipeline`` with one expansion step inserted before
+rerank. The reranker is pluggable so we can isolate whether the
+cross-encoder helps or hurts on this corpus.
 
-The cross-encoder is the load-bearing piece — per the Step 7 brief,
-graph expansion *without* cross-encoder rerank typically makes results
-worse on single-hop queries by adding plausible-but-irrelevant neighbors
-that share embedding space with the query. With it, v2 should match or
-beat v1 across the board.
+``RerankMode``:
+
+- ``"cross_encoder"`` — BAAI/bge-reranker-v2-m3 + weighted combine with
+  cosine and a light metadata signal. The Step-7 brief recommends this
+  as load-bearing — graph expansion without it tends to add noise.
+- ``"vector"`` — skip the cross-encoder; re-query LanceDB so every
+  candidate (seeds + graph-expanded) carries a real cosine, then apply
+  v1's full metadata reranker (cosine + authority + recency + term bonus
+  + repealed penalty). Use this when v2 with cross-encoder regresses on
+  basic factual queries — it isolates "did the graph add useful nodes?"
+  from "is the cross-encoder picking badly on Finnish legal text?".
 """
 from __future__ import annotations
 
@@ -27,6 +34,8 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+from typing import Literal
 
 from src.indexing.graph_store import GraphStore
 from src.indexing.vector_store import VectorStore
@@ -40,17 +49,24 @@ from src.retrieval.cross_encoder_rerank import (
 from src.retrieval.filters import infer_filters
 from src.retrieval.generate import Generation, generate
 from src.retrieval.graph_expand import ExpansionStrategy, expand
-from src.retrieval.rerank import RerankedHit
+from src.retrieval.rerank import RerankedHit, rerank as metadata_rerank
 from src.retrieval.strategy import pick_strategy
 from src.retrieval.vector_retriever import RetrievedHit, VectorRetriever, _row_to_hit
 
 
 # Maximum chunks pulled per graph-expanded section. One per section keeps the
-# rerank candidate set bounded; the cross-encoder picks the most relevant.
+# rerank candidate set bounded; downstream rerank picks the most relevant.
 MAX_CHUNKS_PER_SECTION = 1
 
 # How many results to assemble into the final context. Matches v1's default.
 DEFAULT_CONTEXT_N = 8
+
+# Reranker selector. Flip this to switch the default mode across the whole
+# codebase without touching call sites. The constructor arg
+# ``rerank_mode`` and the CLI ``--rerank=...`` flag override it.
+DEFAULT_RERANK_MODE: "RerankMode" = "cross_encoder"
+
+RerankMode = Literal["cross_encoder", "vector"]
 
 
 class PipelineV2:
@@ -61,16 +77,18 @@ class PipelineV2:
         *,
         vector_db_path: str | Path,
         graph_db_path: str | Path = "output/graph.db",
+        rerank_mode: RerankMode = DEFAULT_RERANK_MODE,
         load_cross_encoder_eagerly: bool = False,
     ) -> None:
         self.vector_db_path = str(vector_db_path)
         self.graph_db_path = str(graph_db_path)
+        self.rerank_mode: RerankMode = rerank_mode
         self.retriever = VectorRetriever(self.vector_db_path)
         self.vector_store = self.retriever.store  # reuse same LanceDB connection
         self.graph = GraphStore(self.graph_db_path)
         # Cross-encoder model is heavy (~1.1 GB, ~5-10 s warmup). Lazy by
-        # default so import-time and test fixtures stay fast.
-        if load_cross_encoder_eagerly:
+        # default; only relevant for ``rerank_mode='cross_encoder'``.
+        if load_cross_encoder_eagerly and rerank_mode == "cross_encoder":
             get_reranker()
 
     # ------------------------------------------------------------------
@@ -158,43 +176,25 @@ class PipelineV2:
                 )
         timings["materialise"] = _ms_since(t)
 
-        # 6. Cross-encoder rerank --------------------------------------------
+        # 6. Rerank — branched by mode --------------------------------------
         t = time.perf_counter()
-        rr = get_reranker()
         candidates = list(candidate_pool.values())
-        pairs = [(c.hit.chunk_id, c.hit.embedded_text or "") for c in candidates]
-        scored: list[ScoredCandidate] = rr.score(question, pairs)
-        # Annotate ScoredCandidate with cosine + metadata-score so the
-        # weighted combine has all three components per the strategy.
-        cand_by_id = {c.hit.chunk_id: c for c in candidates}
-        for s in scored:
-            c = cand_by_id[s.chunk_id]
-            # Convert similarity in [0,1] back to a distance-shaped value the
-            # combine helper expects (it does the inverse internally).
-            s.cosine = max(0.0, min(2.0, 2.0 * (1.0 - c.cosine_sim)))
-            s.metadata_score = _metadata_signal(c.hit)
-        combined = combine_scores(scored, weights=strategy.rerank_weights)
-        timings["cross_encoder"] = _ms_since(t)
-
-        # 7. Build RerankedHits for assemble.assemble ------------------------
-        t = time.perf_counter()
-        reranked: list[RerankedHit] = []
-        for s in combined:
-            c = cand_by_id[s.chunk_id]
-            reranked.append(
-                RerankedHit(
-                    hit=c.hit,
-                    score=s.final_score or s.cross_score,
-                    components={
-                        "cross_encoder": s.cross_score,
-                        "cosine_sim": c.cosine_sim,
-                        "metadata": s.metadata_score or 0.0,
-                        "final": s.final_score or 0.0,
-                        "hops": float(c.retrieval_path.hops),
-                    },
-                )
+        if self.rerank_mode == "cross_encoder":
+            reranked = _rerank_cross_encoder(
+                question=question,
+                candidates=candidates,
+                strategy=strategy,
+                candidate_pool=candidate_pool,
             )
-        timings["rerank_build"] = _ms_since(t)
+            timings["cross_encoder"] = _ms_since(t)
+        else:  # "vector"
+            reranked = _rerank_vector(
+                question=question,
+                candidates=candidates,
+                candidate_pool=candidate_pool,
+                retriever=self.retriever,
+            )
+            timings["vector_rerank"] = _ms_since(t)
 
         # 8. Assemble + generate (unchanged from v1) -------------------------
         t = time.perf_counter()
@@ -231,11 +231,16 @@ class PipelineV2:
 _pipeline_v2: PipelineV2 | None = None
 
 
-def get_pipeline_v2(vector_db_path: str | Path) -> PipelineV2:
-    """Process-singleton v2 pipeline. Path honored only on first call."""
+def get_pipeline_v2(
+    vector_db_path: str | Path,
+    rerank_mode: RerankMode = DEFAULT_RERANK_MODE,
+) -> PipelineV2:
+    """Process-singleton v2 pipeline. Path + rerank_mode honored only on first
+    call — switching modes mid-process requires resetting ``_pipeline_v2``.
+    """
     global _pipeline_v2
-    if _pipeline_v2 is None:
-        _pipeline_v2 = PipelineV2(vector_db_path=vector_db_path)
+    if _pipeline_v2 is None or _pipeline_v2.rerank_mode != rerank_mode:
+        _pipeline_v2 = PipelineV2(vector_db_path=vector_db_path, rerank_mode=rerank_mode)
     return _pipeline_v2
 
 
@@ -243,12 +248,13 @@ def answer_v2(
     question: str,
     *,
     vector_db_path: str | Path,
+    rerank_mode: RerankMode = DEFAULT_RERANK_MODE,
     n: int = DEFAULT_CONTEXT_N,
     extra_filters: dict[str, Any] | None = None,
     strategy_override: ExpansionStrategy | None = None,
 ) -> AnswerResult:
     """Convenience: open a v2 pipeline (cached) and run one question."""
-    return get_pipeline_v2(vector_db_path).answer(
+    return get_pipeline_v2(vector_db_path, rerank_mode).answer(
         question,
         n=n,
         extra_filters=extra_filters,
@@ -313,6 +319,104 @@ def _fetch_chunks_for_sections(
         # we pass distance=1.0 → similarity 0.0 as a placeholder. The cross-
         # encoder is what discriminates these.
         out.append(_row_to_hit(row, distance=1.0))
+    return out
+
+
+def _rerank_cross_encoder(
+    *,
+    question: str,
+    candidates: list["_Candidate"],
+    strategy: ExpansionStrategy,
+    candidate_pool: dict[str, "_Candidate"],
+) -> list[RerankedHit]:
+    """Cross-encoder + weighted combine (cross, cosine, metadata).
+
+    Reads each candidate's ``embedded_text`` against the query. Best on
+    multi-hop / cross-source queries where the cosine alone can't tell which
+    of several semantically-similar passages actually answers the question.
+    """
+    rr = get_reranker()
+    pairs = [(c.hit.chunk_id, c.hit.embedded_text or "") for c in candidates]
+    scored: list[ScoredCandidate] = rr.score(question, pairs)
+    cand_by_id = {c.hit.chunk_id: c for c in candidates}
+    for s in scored:
+        c = cand_by_id[s.chunk_id]
+        # combine_scores expects ``cosine`` as a distance-shaped value (it
+        # converts back to similarity internally).
+        s.cosine = max(0.0, min(2.0, 2.0 * (1.0 - c.cosine_sim)))
+        s.metadata_score = _metadata_signal(c.hit)
+    combined = combine_scores(scored, weights=strategy.rerank_weights)
+
+    out: list[RerankedHit] = []
+    for s in combined:
+        c = cand_by_id[s.chunk_id]
+        out.append(
+            RerankedHit(
+                hit=c.hit,
+                score=s.final_score or s.cross_score,
+                components={
+                    "cross_encoder": s.cross_score,
+                    "cosine_sim": c.cosine_sim,
+                    "metadata": s.metadata_score or 0.0,
+                    "final": s.final_score or 0.0,
+                    "hops": float(c.retrieval_path.hops),
+                },
+            )
+        )
+    return out
+
+
+def _rerank_vector(
+    *,
+    question: str,
+    candidates: list["_Candidate"],
+    candidate_pool: dict[str, "_Candidate"],
+    retriever: VectorRetriever,
+) -> list[RerankedHit]:
+    """Pure vector-similarity rerank.
+
+    Re-queries LanceDB with ``chunk_id IN [all candidates]`` so every
+    candidate — seeds and graph-expanded alike — gets a real cosine against
+    the user's question. Then applies v1's full metadata reranker
+    (cosine + authority + recency + term bonus − repealed penalty).
+
+    Use this mode to isolate whether the cross-encoder is hurting on Finnish
+    legal text. The graph expansion still happens; only the scoring changes.
+    """
+    if not candidates:
+        return []
+    candidate_ids = [c.hit.chunk_id for c in candidates]
+    # Re-query gives every candidate (including formerly-cosine-0 graph
+    # expansions) a real cosine. LanceDB's ``where`` supports IN clauses;
+    # we set ``k`` to the full set size so nothing is dropped.
+    rescored = retriever.retrieve(
+        question,
+        k=len(candidate_ids),
+        filters={"chunk_id": candidate_ids},
+    )
+    # Edge case: LanceDB may return fewer rows than asked if some chunk_ids
+    # weren't indexed (shouldn't happen post-sanity-check, but be defensive).
+    rescored_by_id = {h.chunk_id: h for h in rescored}
+    # Run v1's full metadata reranker. Its formula:
+    #   score = cosine + 0.10*auth + 0.05*recency + 0.05*term − 0.50*repealed
+    fresh_hits = [rescored_by_id[c.hit.chunk_id]
+                  for c in candidates
+                  if c.hit.chunk_id in rescored_by_id]
+    reranked = metadata_rerank(question, fresh_hits)
+
+    # Promote hops + retrieval_path provenance onto components so --verbose
+    # still shows where each candidate came from.
+    out: list[RerankedHit] = []
+    for r in reranked:
+        c = candidate_pool.get(r.hit.chunk_id)
+        hops = float(c.retrieval_path.hops) if c is not None else 0.0
+        out.append(
+            RerankedHit(
+                hit=r.hit,
+                score=r.score,
+                components={**r.components, "hops": hops},
+            )
+        )
     return out
 
 

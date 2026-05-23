@@ -15,11 +15,49 @@ the deps installed raises a clear ``RuntimeError``.
 
 Model cache: ``~/.cache/huggingface/`` by default. The first ``score()``
 call downloads ~1.1 GB.
+
+Offline mode: any ``HF_*`` or ``TRANSFORMERS_OFFLINE`` keys present in the
+project's ``.env`` file are loaded into ``os.environ`` at import time, before
+``sentence_transformers`` is imported. Setting ``HF_HUB_OFFLINE=1`` in
+``.env`` therefore makes this module run fully offline against the cached
+model (silences the "set HF_TOKEN" warning, blocks cache-validation HEAD
+requests).
 """
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Iterable, Sequence
+
+
+# ---------------------------------------------------------------------------
+# .env loader for HF offline flags
+#
+# The project's .env file is not auto-loaded by anything global; voyage_client
+# hand-parses one specific key (VOYAGE_API_KEY). We do the same here, narrowly
+# scoped to HF_* / TRANSFORMERS_OFFLINE so we don't shadow other keys. Must
+# run *before* ``sentence_transformers`` imports below — those imports read
+# the env vars on their first call.
+# ---------------------------------------------------------------------------
+
+
+def _load_hf_offline_env() -> None:
+    project_root = Path(__file__).resolve().parents[2]
+    env_path = project_root / ".env"
+    if not env_path.exists():
+        return
+    for line in env_path.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        if key.startswith("HF_") or key == "TRANSFORMERS_OFFLINE":
+            os.environ.setdefault(key, value.strip().strip('"').strip("'"))
+
+
+_load_hf_offline_env()
 
 # Default model picked per the Step 7 brief — multilingual cross-encoder,
 # 568M parameters, supports Finnish well alongside the other 100+ languages

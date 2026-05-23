@@ -9,8 +9,8 @@ from src.models import AnswerResult, RetrievalPath
 from src.retrieval.pipeline import Pipeline, answer, get_pipeline
 
 
-# Default vector store. Switch to "output/lancedb" when Step 4a finishes.
-VECTOR_DB_PATH = "output/lancedb_pilot"
+# Default vector store — full corpus (402,088 vectors) now that Step 4a is done.
+VECTOR_DB_PATH = "output/lancedb"
 
 # Graph store is fully loaded at start of the parallel phase — no switch.
 GRAPH_DB_PATH = "output/graph.db"
