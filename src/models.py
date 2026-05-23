@@ -326,6 +326,51 @@ class RetrievalPath:
 
 
 # --------------------------------------------------------------------------
+# AmendmentCaveat — surfaced by every pipeline when cited chunks are
+# touched by ancestor-level amendment/repeal/interpretation activity.
+# Produced from ``temporal_status`` written by ``compute_temporal_status``.
+# --------------------------------------------------------------------------
+
+
+class AmendmentCaveat(BaseModel):
+    """Why one cited chunk might be temporally stale.
+
+    Carried on every ``AnswerResult`` whose cited sections show non-``ok``
+    ``effective_usable`` in their graph metadata. The UI and the Verifier
+    agent should render these as a "Huomioitavaa:" block under the answer
+    so the user knows the citation isn't blindly current.
+    """
+
+    chunk_id: str
+    section_id: str
+
+    # Matches ``temporal_status.effective_usable``. We never emit a caveat
+    # for ``ok`` — the absence of the caveat is the signal.
+    kind: Literal["suspect", "stale", "repealed"]
+
+    # The amendment id that triggered the flag (latest amendment to the
+    # parent LAW). Empty for ``stale``/``repealed`` driven purely by the
+    # LAW's own metadata.
+    nearest_amendment_id: str | None = None
+
+    # ISO date of the latest amendment to the parent LAW.
+    amendment_effective_date: str | None = None
+
+    # Total number of amendments to the parent LAW — gives the reader a
+    # sense of how volatile this section is. 200+ amendments → high.
+    amendment_count_in_law: int | None = None
+
+    # Inbound interpretations (KHO/KVL) on the cited section or its LAW.
+    interpreted_count: int | None = None
+    latest_interpretation_date: str | None = None
+
+    # Short Finnish explanation, ready to render under "Huomioitavaa:".
+    explanation_fi: str
+
+    model_config = {"extra": "allow"}
+
+
+# --------------------------------------------------------------------------
 # AnswerResult — produced by every retrieval pipeline (v1, v2, agentic)
 # --------------------------------------------------------------------------
 
@@ -360,5 +405,10 @@ class AnswerResult(BaseModel):
 
     # Conflicts surfaced during synthesis (e.g. KHO vs Vero guidance).
     conflicts: list[dict[str, Any]] = Field(default_factory=list)
+
+    # Temporal caveats per cited chunk — populated when a cited section's
+    # ``temporal_status.effective_usable`` is suspect/stale/repealed.
+    # Empty list = every citation is on currently clean ancestor history.
+    amendment_caveats: list[AmendmentCaveat] = Field(default_factory=list)
 
     model_config = {"extra": "allow"}

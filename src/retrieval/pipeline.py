@@ -23,8 +23,9 @@ from pathlib import Path
 from typing import Any
 
 from src.indexing.graph_store import GraphStore
-from src.models import AnswerResult, RetrievalPath
+from src.models import AmendmentCaveat, AnswerResult, RetrievalPath
 from src.retrieval.assemble import AssembledContext, assemble
+from src.retrieval.caveats import build_amendment_caveats
 from src.retrieval.filters import infer_filters
 from src.retrieval.generate import Generation, generate
 from src.retrieval.rerank import RerankedHit, rerank
@@ -79,8 +80,16 @@ class Pipeline:
         timings["vector_retrieve"] = _ms_since(t)
 
         # 3. Rerank ---------------------------------------------------------
+        # Bulk-fetch temporal_status for the candidate section_ids so the
+        # graded penalty can be applied (Move 3). One SQL roundtrip
+        # regardless of k. Hits without a status entry fall back to the
+        # legacy binary penalty inside rerank().
         t = time.perf_counter()
-        reranked: list[RerankedHit] = rerank(question, hits)
+        unique_section_ids = list({h.section_id for h in hits})
+        temporal_status_map = self.graph.get_temporal_status_map(unique_section_ids)
+        reranked: list[RerankedHit] = rerank(
+            question, hits, temporal_status_map=temporal_status_map
+        )
         timings["rerank"] = _ms_since(t)
 
         # 4. Assemble -------------------------------------------------------
@@ -93,6 +102,15 @@ class Pipeline:
         gen: Generation = generate(question, context)
         timings["generate"] = _ms_since(t)
 
+        # 6. Caveats --------------------------------------------------------
+        # Build amendment_caveats from the actually-cited chunks. One graph
+        # roundtrip; skipped entirely when the LLM cited nothing.
+        amendment_caveats = build_amendment_caveats(
+            cited_chunk_ids=gen.cited_chunk_ids,
+            context=context,
+            graph=self.graph,
+        )
+
         timings["total"] = _ms_since(t_total)
 
         return _build_answer_result(
@@ -102,6 +120,7 @@ class Pipeline:
             reranked=reranked,
             applied_filters=filters,
             timings=timings,
+            amendment_caveats=amendment_caveats,
         )
 
     def close(self) -> None:
@@ -155,6 +174,7 @@ def _build_answer_result(
     reranked: list[RerankedHit],
     applied_filters: dict[str, Any],
     timings: dict[str, int],
+    amendment_caveats: list[AmendmentCaveat] | None = None,
 ) -> AnswerResult:
     """Compose the AnswerResult contract.
 
@@ -200,4 +220,5 @@ def _build_answer_result(
         timing_ms=timings,
         assumptions=assumptions,
         conflicts=[],  # v1 leaves conflict surfacing to the LLM prose; Verifier in Step 8 fills this.
+        amendment_caveats=amendment_caveats or [],
     )

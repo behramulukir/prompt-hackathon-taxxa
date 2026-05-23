@@ -167,8 +167,14 @@ def _header_line(
     usable: bool | None,
     authority_rank: int | None,
     publication_date: str | None,
+    temporal_status: dict | None = None,
 ) -> str:
-    """``[Source 1] Vero ohje · Mainoslahjat (in force, authority_rank=60, 2019-04-12)``"""
+    """``[Source 1] Vero ohje · Mainoslahjat (in force, authority_rank=60, 2019-04-12)``
+
+    When ``temporal_status`` is supplied (Move 2 output), the header
+    surfaces ``effective_usable`` (suspect/stale/repealed) so the LLM sees
+    the ancestor-aware grade alongside the binary ``in force`` flag.
+    """
     publisher = _short_subcorpus(hit_subcorpus)
     head = f"[Source {index}] {publisher}"
     if title:
@@ -185,9 +191,54 @@ def _header_line(
         flags.append(f"authority_rank={authority_rank}")
     if publication_date:
         flags.append(publication_date)
+    # Ancestor-aware grade. ``ok`` is the silent default; only flag the
+    # interesting buckets so the prompt stays compact.
+    if isinstance(temporal_status, dict):
+        grade = temporal_status.get("effective_usable")
+        if grade and grade != "ok":
+            flags.append(f"status={grade}")
     if flags:
         head += f" ({', '.join(flags)})"
     return head
+
+
+def _temporal_lines(temporal_status: dict | None) -> list[str]:
+    """Render the amendment + interpretation history as bullet lines.
+
+    These come straight from the ``temporal_status`` dict written by
+    ``scripts.compute_temporal_status`` — no DB hops here. Lines are
+    emitted only when there's something to say; sources with a clean
+    history stay compact.
+    """
+    if not isinstance(temporal_status, dict):
+        return []
+    lines: list[str] = []
+    count = temporal_status.get("amendment_count_in_law") or 0
+    after = temporal_status.get("ancestor_amended_after")
+    if count and after:
+        lines.append(
+            f"  Amendments to parent LAW: {count} "
+            f"(latest effective {after} — may post-date this text)"
+        )
+    elif count:
+        lines.append(f"  Amendments to parent LAW: {count}")
+
+    interp_count = temporal_status.get("interpreted_count") or 0
+    interp_latest = temporal_status.get("latest_interpretation_date")
+    if interp_count and interp_latest:
+        lines.append(
+            f"  Interpretations on file: {interp_count} "
+            f"(latest {interp_latest})"
+        )
+    elif interp_count:
+        lines.append(f"  Interpretations on file: {interp_count}")
+
+    grade = temporal_status.get("effective_usable")
+    if grade == "stale":
+        lines.append("  Note: parent LAW has been superseded — verify before citing.")
+    elif grade == "repealed":
+        lines.append("  Note: this section or its parent LAW has been repealed.")
+    return lines
 
 
 # --------------------------------------------------------------------------
@@ -290,12 +341,25 @@ def assemble(
     Dedups by section_id first (so N is the number of *distinct sections*,
     not chunks), renders the prescribed header/path/edges/body format, and
     returns the assembled string + the Source→chunk_id mapping.
+
+    Each rendered block now also carries ancestor-aware temporal context
+    (Move 4): a one-line summary of amendments to the parent LAW and
+    inbound KHO/Vero interpretations, both pulled from
+    ``metadata.temporal_status`` (Move 2 output). The lines are omitted
+    when there's nothing to say so the LLM prompt stays compact.
     """
     deduped = dedup_by_section(reranked)[:n]
     if not deduped:
         return AssembledContext(text="", sources=[])
 
     section_id_to_index = {r.hit.section_id: i + 1 for i, r in enumerate(deduped)}
+
+    # One DB roundtrip for the temporal_status of every shown section.
+    # Mirrors what the rerank step already does; results are tiny so this
+    # is cheap enough to repeat.
+    temporal_status_map = graph.get_temporal_status_map(
+        [r.hit.section_id for r in deduped]
+    )
 
     sources: list[Source] = []
     blocks: list[str] = []
@@ -304,6 +368,7 @@ def assemble(
         prefix, body = _split_prefix_body(hit.embedded_text)
         path = _extract_path(prefix)
         title = _extract_title(prefix)
+        temporal_status = temporal_status_map.get(hit.section_id)
 
         header = _header_line(
             index=idx,
@@ -313,6 +378,7 @@ def assemble(
             usable=hit.usable,
             authority_rank=hit.authority_rank,
             publication_date=hit.publication_date,
+            temporal_status=temporal_status,
         )
 
         lines: list[str] = [header]
@@ -323,6 +389,7 @@ def assemble(
             hit.section_id, section_id_to_index, graph
         )
         lines.extend(edge_lines)
+        lines.extend(_temporal_lines(temporal_status))
 
         body_text = _trim_body(body) if body else ""
         lines.append("")  # blank line between header block and body

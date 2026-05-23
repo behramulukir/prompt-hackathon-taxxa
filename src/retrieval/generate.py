@@ -52,6 +52,11 @@ Rules:
 - Be specific. Quote thresholds, percentages, and section numbers verbatim from the sources.
 - Keep the answer concise — 3 to 8 sentences for most questions.
 - When sources are connected (you see "Cites:", "Interpreted by:", "Amended by:" etc. between them), use those relationships to structure your reasoning: e.g. "The general rule is [Source 1], but [Source 1] cites [Source 3] for the exception..."
+
+Temporal awareness:
+- Each source header may carry `status=suspect | stale | repealed`, and the block may include `Amendments to parent LAW`, `Interpretations on file`, or `Note:` lines. Read these.
+- If a cited source's status is `suspect`, `stale`, or `repealed`, add a short "Huomioitavaa:" / "Note:" block (one or two sentences) after the answer. Name the source and explain why it might be outdated: e.g. "[Source 3] kuuluu lakiin, johon on tehty 200+ muutosta, joista uusin on voimassa 2025 alkaen — varmista nykytila." Never silently rely on a suspect/stale source.
+- For `repealed` sources, do not present them as current law — describe them as historical and prefer a non-repealed alternative if one is in the sources.
 """
 
 

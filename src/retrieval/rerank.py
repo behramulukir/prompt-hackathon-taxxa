@@ -23,7 +23,30 @@ from src.retrieval.vector_retriever import RetrievedHit
 W_AUTHORITY = 0.10  # multiplied by (authority_rank / 100)
 W_RECENCY = 0.05  # multiplied by recency_signal in [0, 1]
 W_TERM_BONUS = 0.05  # added if query term appears in section title/path
-W_NOT_USABLE = 0.50  # subtracted when usable=false (repealed)
+W_NOT_USABLE = 0.50  # subtracted when usable=false — legacy fallback
+
+# Graded temporal penalty driven by ``temporal_status.effective_usable``
+# from ``scripts.compute_temporal_status``. Replaces the binary
+# W_NOT_USABLE penalty when a status map is supplied to ``rerank``.
+#
+# Rationale (the "ancestor-aware" piece of the design):
+#   * "repealed" is a confirmed self- or ancestor-level repeal — never
+#     usable for current-law queries, but kept retrievable. Same magnitude
+#     as the old W_NOT_USABLE so legacy behavior matches when only repeals
+#     are present.
+#   * "stale" — the LAW root is superseded by a real successor act. The
+#     section text the user sees may still be on-paper but the citation
+#     should not be relied on without checking the successor.
+#   * "suspect" — the section's LAW has amendments dated after this
+#     chunk's publication_date. The chunk text *may* already reflect them
+#     (consolidated Finlex usually does), so the penalty is gentle.
+#   * "ok" — no temporal concerns.
+W_TEMPORAL_PENALTY: dict[str, float] = {
+    "ok":       0.00,
+    "suspect":  0.10,
+    "stale":    0.25,
+    "repealed": 0.50,
+}
 
 # Recency: linearly decay from 1.0 at the most recent publication_date in
 # the result set to 0.0 at this many days older. ~10 years gives older Vero
@@ -127,11 +150,21 @@ def _exact_term_bonus(query_terms: list[str], embedded_text: str | None) -> floa
 def rerank(
     query: str,
     hits: list[RetrievedHit],
+    *,
+    temporal_status_map: dict[str, dict | None] | None = None,
 ) -> list[RerankedHit]:
-    """Reorder hits by ``cosine_sim + authority + recency + term - repealed``.
+    """Reorder hits by ``cosine_sim + authority + recency + term - temporal``.
 
     Stable for equal scores (Python's sort is stable). The input list is not
     mutated.
+
+    ``temporal_status_map`` is keyed by ``section_id`` and maps to the
+    ``temporal_status`` dict written by ``scripts.compute_temporal_status``.
+    When supplied, the temporal penalty is graded by
+    ``effective_usable`` (ok/suspect/stale/repealed) — see
+    ``W_TEMPORAL_PENALTY``. When omitted (or when the entry is missing for
+    a given hit), we fall back to the legacy binary penalty driven by
+    ``hit.usable``, so callers without graph-store access keep working.
     """
     if not hits:
         return []
@@ -149,22 +182,48 @@ def rerank(
         auth = (hit.authority_rank or 0) / 100.0
         rec = _recency_signal(hit_date, newest)
         term = _exact_term_bonus(query_terms, hit.embedded_text)
-        # ``usable`` is True for current/binding chunks. None means unknown —
-        # don't penalize unknowns, only confirmed repealed.
-        not_usable_pen = W_NOT_USABLE if hit.usable is False else 0.0
+        temporal_pen, temporal_grade = _temporal_penalty(hit, temporal_status_map)
 
         components = {
             "cosine": hit.cosine_sim,
             "authority": W_AUTHORITY * auth,
             "recency": W_RECENCY * rec,
             "term_bonus": W_TERM_BONUS * term,
-            "not_usable_penalty": -not_usable_pen,
+            # Keep the legacy name in --verbose output so existing dashboards
+            # don't break, but the value is now graded.
+            "not_usable_penalty": -temporal_pen,
+            "temporal_grade": temporal_grade,
         }
-        score = sum(components.values())
+        score = sum(v for k, v in components.items()
+                    if k != "temporal_grade" and isinstance(v, (int, float)))
         out.append(RerankedHit(hit=hit, score=score, components=components))
 
     out.sort(key=lambda r: r.score, reverse=True)
     return out
+
+
+def _temporal_penalty(
+    hit: RetrievedHit,
+    status_map: dict[str, dict | None] | None,
+) -> tuple[float, float]:
+    """Return ``(penalty, grade_as_float)``.
+
+    ``grade_as_float`` is a debug-only encoding so the rerank diagnostics
+    can show which bucket fired — 0=ok, 1=suspect, 2=stale, 3=repealed,
+    -1=unknown (no status, legacy binary applied).
+    """
+    grade_to_num = {"ok": 0.0, "suspect": 1.0, "stale": 2.0, "repealed": 3.0}
+
+    if status_map is not None:
+        status = status_map.get(hit.section_id)
+        if isinstance(status, dict):
+            grade = str(status.get("effective_usable") or "ok")
+            return W_TEMPORAL_PENALTY.get(grade, 0.0), grade_to_num.get(grade, 0.0)
+
+    # Legacy path — no graph-store map. Honor the old binary signal.
+    if hit.usable is False:
+        return W_NOT_USABLE, 3.0
+    return 0.0, -1.0
 
 
 def top_n(reranked: list[RerankedHit], n: int) -> list[RerankedHit]:

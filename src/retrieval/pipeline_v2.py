@@ -39,8 +39,9 @@ from typing import Literal
 
 from src.indexing.graph_store import GraphStore
 from src.indexing.vector_store import VectorStore
-from src.models import AnswerResult, RetrievalPath
+from src.models import AmendmentCaveat, AnswerResult, RetrievalPath
 from src.retrieval.assemble import AssembledContext, assemble
+from src.retrieval.caveats import build_amendment_caveats
 from src.retrieval.cross_encoder_rerank import (
     ScoredCandidate,
     combine_scores,
@@ -179,12 +180,20 @@ class PipelineV2:
         # 6. Rerank — branched by mode --------------------------------------
         t = time.perf_counter()
         candidates = list(candidate_pool.values())
+        # Common to both rerank modes: bulk-fetch temporal_status for the
+        # candidate sections so the graded penalty / metadata signal can be
+        # ancestor-aware (Move 3).
+        candidate_section_ids = list({c.hit.section_id for c in candidates})
+        temporal_status_map = self.graph.get_temporal_status_map(
+            candidate_section_ids
+        )
         if self.rerank_mode == "cross_encoder":
             reranked = _rerank_cross_encoder(
                 question=question,
                 candidates=candidates,
                 strategy=strategy,
                 candidate_pool=candidate_pool,
+                temporal_status_map=temporal_status_map,
             )
             timings["cross_encoder"] = _ms_since(t)
         else:  # "vector"
@@ -193,6 +202,8 @@ class PipelineV2:
                 candidates=candidates,
                 candidate_pool=candidate_pool,
                 retriever=self.retriever,
+                graph=self.graph,
+                temporal_status_map=temporal_status_map,
             )
             timings["vector_rerank"] = _ms_since(t)
 
@@ -204,6 +215,13 @@ class PipelineV2:
         t = time.perf_counter()
         gen: Generation = generate(question, context)
         timings["generate"] = _ms_since(t)
+
+        # Amendment caveats from the actually-cited chunks (Move 5).
+        amendment_caveats = build_amendment_caveats(
+            cited_chunk_ids=gen.cited_chunk_ids,
+            context=context,
+            graph=self.graph,
+        )
 
         timings["total"] = _ms_since(t_total)
 
@@ -217,6 +235,7 @@ class PipelineV2:
             strategy=strategy,
             applied_filters=filters,
             timings=timings,
+            amendment_caveats=amendment_caveats,
         )
 
     def close(self) -> None:
@@ -328,12 +347,18 @@ def _rerank_cross_encoder(
     candidates: list["_Candidate"],
     strategy: ExpansionStrategy,
     candidate_pool: dict[str, "_Candidate"],
+    temporal_status_map: dict[str, dict | None],
 ) -> list[RerankedHit]:
     """Cross-encoder + weighted combine (cross, cosine, metadata).
 
     Reads each candidate's ``embedded_text`` against the query. Best on
     multi-hop / cross-source queries where the cosine alone can't tell which
     of several semantically-similar passages actually answers the question.
+
+    ``temporal_status_map`` is consulted by ``_metadata_signal`` so the
+    metadata score is ancestor-aware (Move 3) — a chunk whose LAW root has
+    been amended after its publication_date is dampened relative to one
+    whose ancestor chain is clean.
     """
     rr = get_reranker()
     pairs = [(c.hit.chunk_id, c.hit.embedded_text or "") for c in candidates]
@@ -344,7 +369,9 @@ def _rerank_cross_encoder(
         # combine_scores expects ``cosine`` as a distance-shaped value (it
         # converts back to similarity internally).
         s.cosine = max(0.0, min(2.0, 2.0 * (1.0 - c.cosine_sim)))
-        s.metadata_score = _metadata_signal(c.hit)
+        s.metadata_score = _metadata_signal(
+            c.hit, temporal_status_map.get(c.hit.section_id)
+        )
     combined = combine_scores(scored, weights=strategy.rerank_weights)
 
     out: list[RerankedHit] = []
@@ -372,6 +399,8 @@ def _rerank_vector(
     candidates: list["_Candidate"],
     candidate_pool: dict[str, "_Candidate"],
     retriever: VectorRetriever,
+    graph: GraphStore,
+    temporal_status_map: dict[str, dict | None],
 ) -> list[RerankedHit]:
     """Pure vector-similarity rerank.
 
@@ -402,7 +431,12 @@ def _rerank_vector(
     fresh_hits = [rescored_by_id[c.hit.chunk_id]
                   for c in candidates
                   if c.hit.chunk_id in rescored_by_id]
-    reranked = metadata_rerank(question, fresh_hits)
+    # ``temporal_status_map`` is passed in by the caller (one fetch per
+    # answer call). Forward it to the metadata reranker so the graded
+    # penalty (Move 3) applies.
+    reranked = metadata_rerank(
+        question, fresh_hits, temporal_status_map=temporal_status_map
+    )
 
     # Promote hops + retrieval_path provenance onto components so --verbose
     # still shows where each candidate came from.
@@ -420,20 +454,45 @@ def _rerank_vector(
     return out
 
 
-def _metadata_signal(hit: RetrievedHit) -> float:
+def _metadata_signal(
+    hit: RetrievedHit,
+    temporal_status: dict | None = None,
+) -> float:
     """Light-weight metadata score in [0, 1] for the weighted combine.
 
-    Picks up authority + usable + in_force so the cross-encoder's choice
-    isn't blind to source rank. Not as elaborate as v1's metadata reranker
-    because the cross-encoder is doing most of the discrimination work.
+    Picks up authority + temporal_status + in_force so the cross-encoder's
+    choice isn't blind to source rank or to ancestor-level amendment
+    activity. Not as elaborate as v1's metadata reranker because the
+    cross-encoder is doing most of the discrimination work.
+
+    ``temporal_status`` (Move 2 output) supersedes the legacy
+    ``hit.usable`` flag when supplied. Falls back to ``hit.usable`` for
+    nodes whose status hasn't been computed.
     """
     score = 0.0
     if hit.authority_rank is not None:
         score += hit.authority_rank / 100.0 * 0.6
-    if hit.usable is True:
+
+    # Prefer the ancestor-aware grade when available.
+    grade = None
+    if isinstance(temporal_status, dict):
+        grade = temporal_status.get("effective_usable")
+    if grade == "ok":
         score += 0.2
-    elif hit.usable is False:
+    elif grade == "suspect":
+        # Small dampen — consolidated text usually reflects the amendment.
+        score += 0.05
+    elif grade == "stale":
+        score -= 0.2
+    elif grade == "repealed":
         score -= 0.4
+    elif grade is None:
+        # No graph status — fall back to the binary flag, same as before.
+        if hit.usable is True:
+            score += 0.2
+        elif hit.usable is False:
+            score -= 0.4
+
     if hit.in_force is True:
         score += 0.2
     return max(0.0, min(1.0, score))
@@ -450,6 +509,7 @@ def _build_answer_result_v2(
     strategy: ExpansionStrategy,
     applied_filters: dict[str, Any],
     timings: dict[str, int],
+    amendment_caveats: list[AmendmentCaveat] | None = None,
 ) -> AnswerResult:
     """Compose the AnswerResult for v2. ``retrieval_paths`` keys are chunk_ids
     for vector-anchored sources and node_ids for graph-expanded ones (allowed
@@ -491,4 +551,5 @@ def _build_answer_result_v2(
         timing_ms=timings,
         assumptions=assumptions,
         conflicts=[],
+        amendment_caveats=amendment_caveats or [],
     )

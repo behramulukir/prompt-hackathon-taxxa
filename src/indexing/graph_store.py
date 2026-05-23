@@ -226,5 +226,45 @@ class GraphStore:
 
         return results
 
+    # ----- temporal_status batch lookup ----------------------------------
+
+    def get_temporal_status_map(
+        self, node_ids: list[str]
+    ) -> dict[str, dict | None]:
+        """Bulk lookup of ``metadata.temporal_status`` for many nodes.
+
+        Returns ``{node_id: status_dict_or_None}`` — None when the node is
+        missing from the graph or doesn't have ``temporal_status`` set
+        (e.g. an older graph DB built before ``scripts.compute_temporal_status``
+        was run). Callers should treat missing entries as "unknown" and
+        fall back to the older ``usable`` flag.
+
+        Used by the rerank step to apply the graded temporal penalty
+        without doing one SELECT per chunk.
+        """
+        if not node_ids:
+            return {}
+        out: dict[str, dict | None] = {}
+        # Chunk under SQLite's IN-list limit. 500 is conservative — the
+        # actual limit is 999 placeholders in older builds.
+        BATCH = 500
+        for i in range(0, len(node_ids), BATCH):
+            chunk = node_ids[i:i + BATCH]
+            placeholders = ",".join("?" * len(chunk))
+            cur = self.conn.execute(
+                f"SELECT id, metadata_json FROM nodes WHERE id IN ({placeholders})",
+                chunk,
+            )
+            for nid, mj in cur:
+                try:
+                    meta = json.loads(mj) if mj else {}
+                except json.JSONDecodeError:
+                    meta = {}
+                out[nid] = meta.get("temporal_status")
+        # Backfill misses so callers can iterate without KeyError.
+        for nid in node_ids:
+            out.setdefault(nid, None)
+        return out
+
     def close(self) -> None:
         self.conn.close()
