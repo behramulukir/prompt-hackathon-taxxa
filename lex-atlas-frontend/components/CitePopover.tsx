@@ -153,6 +153,13 @@ const RELATION_DESC: Record<EdgeRelation, string> = {
   applies_in:      "Applies in this jurisdiction (FI / EU / Aaland).",
   excludes:        "Explicit exclusion from scope.",
   in_theme:        "Curated structural community.",
+  // ── DB-native edge types from the Python pipeline ────────────────────
+  parent_of:       "Structural containment (LAW → SECTION).",
+  cites:           "Textual cross-reference between two sections.",
+  amends:          "Amending act → target act.",
+  amends_section:  "Amendment directive targeting a specific section.",
+  repeals:         "Action repealing a section or whole act.",
+  applies:         "Court ruling applied this statutory provision.",
 };
 
 export function CitePopover() {

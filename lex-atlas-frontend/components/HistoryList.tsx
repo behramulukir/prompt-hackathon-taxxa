@@ -17,6 +17,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { HistoryEntry } from "@/lib/history";
 import { relativeTime } from "@/lib/history";
+import { formatCents } from "@/lib/utils";
 
 const DEMO_COLOR: Record<NonNullable<HistoryEntry["demo"]>, string> = {
   q4:     "#1a1c1b",
@@ -153,8 +154,13 @@ function HistoryRow({ entry, variant, onRecall, onRemove }: RowProps) {
           >
             <span>{relativeTime(entry.ts)}</span>
             <span> · asof {entry.asof}</span>
-            {entry.costCents !== undefined && (
-              <span> · €{(entry.costCents / 100).toFixed(3)}</span>
+            {entry.costCents !== undefined && entry.costCents > 0 && (
+              // Mirrors the synthesis-card pill (`AnswerStatusPill`). Both
+              // call ``formatCents`` so a query's cost reads identically
+              // wherever it surfaces — the prior `€${cents/100}` notation
+              // looked like a different number even though it was the same
+              // value in a different unit.
+              <span> · {formatCents(entry.costCents)}</span>
             )}
             {entry.hadDebate && (
               <span style={{ color: "var(--color-secondary)" }}> · debate</span>

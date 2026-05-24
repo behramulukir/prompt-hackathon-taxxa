@@ -46,12 +46,14 @@ SYSTEM_PROMPT = """You are a Finnish tax-regulation research assistant.
 You answer questions using ONLY the sources provided below. Every factual claim must be followed by an inline citation in the form [Source N], where N is the source number from the provided list. You may cite multiple sources on one claim, e.g. [Source 1][Source 3].
 
 Rules:
+- Begin the answer directly with the substantive response. Do NOT open with a parenthetical aside, a header like "Vastaus:" / "Answer:" / "Note:", a preface ("Based on the sources, ..."), or any meta-commentary about how you derived the answer. The first character of your response must be the first character of the actual sentence.
 - Answer in the language of the question (Finnish if the question is in Finnish, English if in English).
 - Finlex statutes are binding law; Vero guidance is interpretive. If Vero guidance appears to conflict with a Finlex section on the same point, surface the conflict explicitly and explain that the Finlex section prevails.
 - If the sources do not contain enough information to answer, say so plainly. Do not guess, do not draw on outside knowledge.
 - Be specific. Quote thresholds, percentages, and section numbers verbatim from the sources.
 - Keep the answer concise — 3 to 8 sentences for most questions.
 - When sources are connected (you see "Cites:", "Interpreted by:", "Amended by:" etc. between them), use those relationships to structure your reasoning: e.g. "The general rule is [Source 1], but [Source 1] cites [Source 3] for the exception..."
+- If a prior assistant turn appears in this conversation, treat it as context for the user's follow-up. The Source numbering in the CURRENT turn refers to the CURRENT source list only — never re-cite an old [Source N] number that no longer exists in the current list.
 
 Temporal awareness:
 - Each source header may carry `status=suspect | stale | repealed`, and the block may include `Amendments to parent LAW`, `Interpretations on file`, or `Note:` lines. Read these.
@@ -148,6 +150,7 @@ def generate(
     question: str,
     context: AssembledContext,
     *,
+    history: list[dict[str, str]] | None = None,
     model: str = MODEL,
     temperature: float = DEFAULT_TEMPERATURE,
     max_tokens: int = DEFAULT_MAX_TOKENS,
@@ -158,6 +161,11 @@ def generate(
     A citation that doesn't resolve (LLM cited [Source 99] which doesn't
     exist) is silently dropped from ``cited_chunk_ids`` but kept in
     ``cited_indices`` so callers can detect and report it.
+
+    ``history`` is prior conversation turns as OpenAI-format messages
+    (``{"role": "user"|"assistant", "content": str}``). Source numbering in
+    each turn is local — the system prompt warns the model not to reuse a
+    [Source N] reference from a prior turn against the current source list.
     """
     if not context.sources:
         # Don't burn a token; the LLM has nothing to cite.
@@ -176,6 +184,17 @@ def generate(
         question=question, context=context.text
     )
 
+    messages: list[dict[str, str]] = [
+        {"role": "system", "content": SYSTEM_PROMPT}
+    ]
+    if history:
+        for msg in history:
+            role = msg.get("role")
+            content = msg.get("content", "")
+            if role in ("user", "assistant") and content:
+                messages.append({"role": role, "content": content})
+    messages.append({"role": "user", "content": user_prompt})
+
     delay = 2.0
     last_err: Exception | None = None
     for attempt in range(max_retries + 1):
@@ -184,10 +203,7 @@ def generate(
                 model=model,
                 temperature=temperature,
                 max_tokens=max_tokens,
-                messages=[
-                    {"role": "system", "content": SYSTEM_PROMPT},
-                    {"role": "user", "content": user_prompt},
-                ],
+                messages=messages,
             )
             break
         except Exception as e:  # network / 5xx / rate-limit

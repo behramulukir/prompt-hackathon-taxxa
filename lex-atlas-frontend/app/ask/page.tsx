@@ -1,22 +1,24 @@
 "use client";
 
 /**
- * /ask — workspace.
+ * /ask — chat-style multi-turn workspace.
  *
- * Layout (fixed after audit screenshot):
- *  - Composer with right-aligned ASK button in a flex-end footer (was absolute,
- *    broke when the textarea wrapped past 2 lines).
- *  - Prompt picker grids 3-col at md+ (was sm, didn't fire at ~1024px because of
- *    the side rail's reserved width).
- *  - Side rail docks at md+ (was lg+, left a 320px hole at 1024–1279).
- *  - Side-rail content swaps automatically: empty-state → constellation backdrop
- *    → OrbitGraph once `subgraph_ready` fires.
+ * The thread is the source of truth: each submit appends a `ChatTurn` and
+ * mounts an <AnswerStream> for the latest one. Completed turns render via
+ * <RenderedAnswer> — same cite anchors, no streaming UI. The history sent
+ * to the sidecar on each follow-up is built from prior turns' question +
+ * cite-stripped answer pairs.
+ *
+ * Layout
+ *  - Empty state (no turns):  hero composer at top + demo prompts + history
+ *  - Chat state (≥1 turn):    scrolling thread above, sticky composer at bottom
+ *  - Side rail: orbit/timeline tracks the LATEST turn (resets on new turn)
  */
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Header } from "@/components/Header";
 import { Footer } from "@/components/Footer";
-import { AnswerStream } from "@/components/AnswerStream";
+import { AnswerStream, RenderedAnswer } from "@/components/AnswerStream";
 import { AgentProgress } from "@/components/AgentProgress";
 import { CitePopover } from "@/components/CitePopover";
 import { Inspector } from "@/components/Inspector";
@@ -27,6 +29,7 @@ import { HistoryButton, HistoryList } from "@/components/HistoryList";
 import { useGraphStore } from "@/lib/store";
 import { useQueryHistory, type HistoryEntry } from "@/lib/history";
 import { formatCents } from "@/lib/utils";
+import type { ChatMessage, ChatTurn } from "@/lib/types";
 
 const PROMPTS = [
   {
@@ -71,12 +74,28 @@ function nowHHMM(): string {
   return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
+/** Strip the frontend's cite markup back to plain labels so the LLM doesn't
+ *  see `[cite:node:X]Source 1[/cite]` noise in prior assistant turns.
+ *  `[cite:node:X]Source 1[/cite]` → `Source 1`. */
+function stripCiteTokens(s: string): string {
+  return s.replace(/\[cite:node:[^\]]+\]([^[]*?)\[\/cite\]/g, "$1");
+}
+
+/** Flatten completed turns into the OpenAI-format history the sidecar wants.
+ *  In-flight (un-done) turns are skipped — they have no committed answer. */
+function buildHistory(turns: ChatTurn[]): ChatMessage[] {
+  const out: ChatMessage[] = [];
+  for (const t of turns) {
+    if (!t.answer || !t.done) continue;
+    out.push({ role: "user", content: t.question });
+    out.push({ role: "assistant", content: stripCiteTokens(t.answer) });
+  }
+  return out;
+}
+
 export default function AskPage() {
   const [question, setQuestion] = useState("");
-  const [submitted, setSubmitted] = useState<string | null>(null);
-  const [submittedDemo, setSubmittedDemo] = useState<HistoryEntry["demo"]>("custom");
-  const [queryId, setQueryId] = useState<string>("");
-  const [timestamp, setTimestamp] = useState<string>("");
+  const [turns, setTurns] = useState<ChatTurn[]>([]);
   const [graphView, setGraphView] = useState<"graph" | "timeline">("graph");
 
   const asof = useGraphStore((s) => s.asof);
@@ -84,10 +103,15 @@ export default function AskPage() {
   const orbitNodes = useGraphStore((s) => s.orbitNodes);
   const debateActive = useGraphStore((s) => s.debateActive);
   const reset = useGraphStore((s) => s.reset);
+  const restoreFromCache = useGraphStore((s) => s.restoreFromCache);
   const setSelectedNodeId = useGraphStore((s) => s.setSelectedNodeId);
   const setSelectedEdgeKey = useGraphStore((s) => s.setSelectedEdgeKey);
   const phase = useGraphStore((s) => s.phase);
   const walkedCount = useGraphStore((s) => s.walkedCount);
+
+  // Latest turn — the one currently streaming (or last completed).
+  const activeTurn = turns.length > 0 ? turns[turns.length - 1] : null;
+  const isStreaming = activeTurn ? !activeTurn.done : false;
 
   /* Local query history (localStorage-backed; SSR-safe). Destructured so
      the push/remove/clear callbacks are stable references — otherwise the
@@ -104,48 +128,133 @@ export default function AskPage() {
     (override?: string, opts?: { demo?: HistoryEntry["demo"]; asof?: string }) => {
       const q = (override ?? question).trim();
       if (!q) return;
+      // Reset the global orbit so the new turn's SSE stream populates fresh.
+      // Previous turns lose their orbit visualization but keep their answer
+      // text in the thread — acceptable tradeoff for v1; a richer version
+      // would snapshot the orbit into each ChatTurn and swap on click.
       reset();
       if (opts?.asof) setAsof(opts.asof);
-      setQueryId(genQueryId());
-      setTimestamp(nowHHMM());
-      setSubmitted(q);
-      setSubmittedDemo(opts?.demo ?? "custom");
+
+      setTurns((prev) => {
+        const history = buildHistory(prev);
+        const newTurn: ChatTurn = {
+          id: genQueryId(),
+          question: q,
+          asof: opts?.asof ?? asof,
+          lang: "en",
+          mode: "ask",
+          timestamp: nowHHMM(),
+          history,
+        };
+        return [...prev, newTurn];
+      });
+      setQuestion("");
     },
-    [question, reset, setAsof]
+    [question, reset, setAsof, asof]
   );
 
-  /* Recall a saved query: set question + asof, then submit, then push to top. */
+  /* Recall a saved query: starts a NEW conversation with the recalled
+     question as turn 1. Carries asof forward.
+     Two paths:
+       1. The entry has a cached snapshot — push a pre-completed turn so
+          `isActive=false` and the renderer uses <RenderedAnswer> instead
+          of <AnswerStream>. Restore the orbit via `restoreFromCache`.
+          No /api/ask call, no re-billing.
+       2. No snapshot (legacy entry) — fall back to a live submit. */
   const recall = useCallback(
     (entry: HistoryEntry) => {
-      setQuestion(entry.question);
-      submit(entry.question, { demo: entry.demo, asof: entry.asof });
-      // Scroll the page back to the top so the freshly-submitted query is visible.
+      setQuestion("");
+      reset();
       if (typeof window !== "undefined") {
         window.scrollTo({ top: 0, behavior: "smooth" });
       }
+      if (entry.cached) {
+        // Cache-replay path: hydrate the orbit + push a done turn.
+        setAsof(entry.asof);
+        restoreFromCache({
+          orbitNodes: entry.cached.orbitNodes,
+          orbitEdges: entry.cached.orbitEdges,
+          conflictPairs: entry.cached.conflictPairs,
+          debate: entry.cached.debate,
+          costCents: entry.costCents,
+        });
+        setTurns([
+          {
+            id: entry.id,
+            question: entry.question,
+            asof: entry.asof,
+            lang: "en",
+            mode: "ask",
+            timestamp: nowHHMM(),
+            history: [],
+            answer: entry.cached.answer,
+            done: true,
+            costCents: entry.costCents,
+          },
+        ]);
+        return;
+      }
+      // Legacy entry: re-run the pipeline.
+      setTurns([]);
+      setTimeout(() => submit(entry.question, { demo: entry.demo, asof: entry.asof }), 0);
     },
-    [submit]
+    [submit, reset, setAsof, restoreFromCache]
   );
 
-  /* Auto-save on `done`. We use a ref-relay so the callback identity stays
-     stable across renders (AnswerStream lists onComplete in its SSE-effect
-     deps; an unstable callback would re-trigger the fetch on every render). */
-  const completeRef = useRef<() => void>(() => {});
-  useEffect(() => {
-    completeRef.current = () => {
-      if (!submitted || !queryId) return;
+  const newConversation = useCallback(() => {
+    setTurns([]);
+    setQuestion("");
+    reset();
+  }, [reset]);
+
+  /* On `done`, freeze the streamed answer into the turn and push the FIRST
+     turn of each conversation to long-lived history. Follow-ups inherit
+     the conversation by virtue of being saved next to turn 1.
+     Also snapshots orbitNodes/orbitEdges/debate/conflicts into
+     ``HistoryEntry.cached`` so the next recall of this query can replay
+     instantly without re-hitting the pipeline. */
+  const handleTurnComplete = useCallback(
+    (turnId: string) => (answer: string) => {
       const s = useGraphStore.getState();
-      pushHistory({
-        id: queryId,
-        question: submitted,
-        asof,
-        demo: submittedDemo,
-        costCents: s.costCents > 0 ? s.costCents : undefined,
-        hadDebate: s.debateActive,
+      const cents = s.costCents;
+      const hadDebate = s.debateActive;
+      setTurns((prev) => {
+        const next = prev.map((t) =>
+          t.id === turnId
+            ? { ...t, answer, done: true, costCents: cents > 0 ? cents : undefined }
+            : t
+        );
+        const idx = next.findIndex((t) => t.id === turnId);
+        if (idx === 0) {
+          pushHistory({
+            id: turnId,
+            question: next[0].question,
+            asof: next[0].asof,
+            demo: "custom",
+            costCents: cents > 0 ? cents : undefined,
+            hadDebate,
+            cached: {
+              answer,
+              orbitNodes: s.orbitNodes,
+              orbitEdges: s.orbitEdges,
+              conflictPairs: s.conflictPairs,
+              debate: s.debate,
+            },
+          });
+        }
+        return next;
       });
-    };
-  }, [submitted, queryId, asof, submittedDemo, pushHistory]);
-  const handleAnswerComplete = useCallback(() => completeRef.current?.(), []);
+    },
+    [pushHistory]
+  );
+
+  // Auto-scroll to the latest turn when it's added.
+  const latestTurnId = activeTurn?.id ?? null;
+  const threadEndRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    if (!latestTurnId) return;
+    threadEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+  }, [latestTurnId]);
 
   // URL-driven auto-submit: ?demo=q4|debate|n1 or ?q=<text>, with ?instant=1
   // to flush the SSE fixture without delays (used for screenshots/e2e).
@@ -167,16 +276,11 @@ export default function AskPage() {
     if (auto) {
       ranAutoSubmit.current = true;
       setQuestion(auto);
-      const demoKey: HistoryEntry["demo"] =
-        demo === "q4" || demo === "debate" || demo === "n1" ? demo : "custom";
-      setTimeout(() => submit(auto, { demo: demoKey }), 0);
+      setTimeout(() => submit(auto), 0);
     }
-    // Allow URL-driven Inspector preselect for screenshots / e2e:
-    //   ?inspect=node:<id> opens the node inspector
-    //   ?inspect=edge:<src>-><dst> opens the edge inspector
+    // Allow URL-driven Inspector preselect for screenshots / e2e.
     const inspect = params.get("inspect");
     if (inspect) {
-      // wait for subgraph_ready before flipping selection on
       const delay = params.get("instant") === "1" ? 200 : 3000;
       setTimeout(() => {
         if (inspect.startsWith("edge:")) {
@@ -189,6 +293,15 @@ export default function AskPage() {
       }, delay);
     }
   }, [submit, setSelectedNodeId, setSelectedEdgeKey]);
+
+  // Memoize the active-turn onComplete so AnswerStream's effect doesn't
+  // re-fire when this page re-renders for unrelated reasons.
+  const activeOnComplete = useMemo(
+    () => (activeTurn ? handleTurnComplete(activeTurn.id) : undefined),
+    [activeTurn, handleTurnComplete]
+  );
+
+  const isEmpty = turns.length === 0;
 
   return (
     <main className="flex min-h-screen flex-col">
@@ -203,84 +316,19 @@ export default function AskPage() {
           className="flex min-w-0 flex-1 flex-col"
           style={{ gap: "var(--space-7)" }}
         >
-          {/* ─── Composer ─── THE hero. Three hairline strips, gradient face. */}
-          <section className="border border-outline-variant bg-gradient-to-b from-surface-container-lowest to-surface-container-low/40">
-            {/* Meta strip */}
-            <div
-              className="flex items-center justify-between border-b border-outline-variant"
-              style={{ paddingInline: "var(--space-5)", paddingBlock: "var(--space-2)" }}
-            >
-              <div className="flex flex-wrap items-center" style={{ gap: "var(--space-2)" }}>
-                <span className="meta-pill">AS OF {asof.replace(/-/g, ".")}</span>
-                <span className="meta-pill">EN-FI</span>
-                <span
-                  className="meta-pill"
-                  style={{ color: "var(--color-secondary)", borderColor: "var(--color-secondary)" }}
-                  title="1,967,776 nodes + 2,250,021 edges (96.9% resolved)"
-                >
-                  1.97M N · 2.25M E
-                </span>
-              </div>
-              <div
-                className="hidden items-center font-mono text-on-surface-variant sm:flex"
-                style={{ gap: "var(--space-2)", fontSize: "var(--text-overline)" }}
-              >
-                <span className="material-symbols-outlined" style={{ fontSize: "var(--icon-xs)" }}>
-                  keyboard_command_key
-                </span>
-                + Enter
-              </div>
-            </div>
+          {/* ─── Composer (HERO) ─── empty state only. */}
+          {isEmpty && (
+            <Composer
+              question={question}
+              setQuestion={setQuestion}
+              onSubmit={() => submit()}
+              asof={asof}
+              variant="hero"
+            />
+          )}
 
-            {/* Query area - serif 26px, room to breathe (textarea min-h ~72px) */}
-            <div style={{ paddingInline: "var(--space-6)", paddingBlock: "var(--space-6)" }}>
-              <textarea
-                value={question}
-                onChange={(e) => {
-                  setQuestion(e.target.value);
-                  const el = e.currentTarget;
-                  el.style.height = "auto";
-                  el.style.height = Math.min(el.scrollHeight, 280) + "px";
-                }}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) submit();
-                }}
-                aria-label="Question"
-                placeholder="What is the withholding rate on key-personnel pay in 2026?"
-                rows={1}
-                style={{ minHeight: 72, lineHeight: 1.35, fontSize: 26 }}
-                className="block w-full resize-none border-0 bg-transparent p-0 font-serif text-on-surface placeholder:font-serif placeholder:font-normal placeholder:italic placeholder:text-on-surface-variant/55 focus:outline-none focus:ring-0"
-              />
-            </div>
-
-            {/* Action strip */}
-            <div
-              className="flex items-center justify-between border-t border-outline-variant"
-              style={{ paddingInline: "var(--space-5)", paddingBlock: "var(--space-3)" }}
-            >
-              <span
-                className="font-mono uppercase tracking-wider text-on-surface-variant"
-                style={{ fontSize: "var(--text-overline)" }}
-              >
-                {question.trim()
-                  ? `${question.trim().length} chars`
-                  : "Cmd + Enter to ask"}
-              </span>
-              <button
-                onClick={() => submit()}
-                disabled={!question.trim()}
-                className="btn-primary btn-sm shrink-0"
-              >
-                Ask
-                <span className="material-symbols-outlined" style={{ fontSize: "var(--icon-sm)" }}>
-                  send
-                </span>
-              </button>
-            </div>
-          </section>
-
-          {/* ─── Demo prompts ─── 3-col grid, no centered-text perception. */}
-          {!submitted && (
+          {/* ─── Demo prompts ─── empty state only. */}
+          {isEmpty && (
             <section style={{ display: "flex", flexDirection: "column", gap: "var(--space-4)" }}>
               <div className="flex items-center justify-between">
                 <p
@@ -308,16 +356,12 @@ export default function AskPage() {
                         paddingBlock: "var(--space-3)",
                       }}
                     >
-                      {/* Tag chip - fixed 80px column on the left */}
                       <span
                         className="w-20 shrink-0 font-mono uppercase tracking-wider text-on-surface-variant"
                         style={{ fontSize: "var(--text-overline)" }}
                       >
                         {p.tag}
                       </span>
-
-                      {/* Label and body on ONE line, separated by an em-dash.
-                          Single-line + truncate kills the "centered label" perception. */}
                       <span
                         className="flex min-w-0 flex-1 items-baseline truncate"
                         style={{ gap: "var(--space-3)" }}
@@ -341,7 +385,6 @@ export default function AskPage() {
                           {p.text}
                         </span>
                       </span>
-
                       <span
                         className="material-symbols-outlined shrink-0 text-on-surface-variant transition-all group-hover:translate-x-0.5 group-hover:text-secondary"
                         style={{ fontSize: "var(--icon-md)" }}
@@ -356,13 +399,13 @@ export default function AskPage() {
                 className="font-sans italic text-on-surface-variant"
                 style={{ fontSize: "var(--text-meta)" }}
               >
-                Pick any prompt above or type your own. Answers stream live with inline citations.
+                Pick any prompt above or type your own. Each follow-up keeps the prior turns as context.
               </p>
             </section>
           )}
 
           {/* ─── Local query history (only if user has any) ─── */}
-          {!submitted && historyEntries.length > 0 && (
+          {isEmpty && historyEntries.length > 0 && (
             <HistoryList
               entries={historyEntries}
               onRecall={recall}
@@ -372,152 +415,69 @@ export default function AskPage() {
             />
           )}
 
-          {/* Conversation flow */}
-          {submitted && (
-            <div className="flex flex-col" style={{ gap: "var(--space-7)" }}>
-              {/* User query - avatar + heading + meta. More breathing room. */}
-              <div
-                className="flex items-start pl-4 md:pl-10"
-                style={{ gap: "var(--space-4)" }}
-              >
-                <div
-                  className="flex shrink-0 items-center justify-center border border-outline-variant bg-surface-variant"
-                  style={{ width: 36, height: 36 }}
+          {/* ─── Chat thread ─── one card per turn. */}
+          {!isEmpty && (
+            <div className="flex flex-col" style={{ gap: "var(--space-8)" }}>
+              {/* Thread header — turn count + actions. */}
+              <div className="flex items-center justify-between">
+                <span
+                  className="font-mono uppercase tracking-wider text-on-surface-variant"
+                  style={{ fontSize: "var(--text-overline)", letterSpacing: "0.08em" }}
                 >
-                  <span
-                    className="material-symbols-outlined text-on-surface-variant"
-                    style={{ fontSize: "var(--icon-md)" }}
+                  Conversation · {turns.length} {turns.length === 1 ? "turn" : "turns"}
+                </span>
+                <div className="flex items-center" style={{ gap: "var(--space-3)" }}>
+                  <HistoryButton
+                    entries={historyEntries}
+                    onRecall={recall}
+                    onRemove={removeHistory}
+                    onClear={clearHistory}
+                  />
+                  <button
+                    onClick={newConversation}
+                    disabled={isStreaming}
+                    className="btn-ghost btn-sm shrink-0"
                   >
-                    person
-                  </span>
-                </div>
-                <div className="flex-1" style={{ paddingTop: 2 }}>
-                  <div
-                    className="font-serif leading-snug text-on-surface"
-                    style={{ fontSize: 22, lineHeight: 1.3 }}
-                  >
-                    {submitted}
-                  </div>
-                  <div
-                    className="font-mono text-on-surface-variant"
-                    style={{
-                      marginTop: "var(--space-3)",
-                      fontSize: "var(--text-overline)",
-                      letterSpacing: "0.05em",
-                    }}
-                  >
-                    Q-ID: {queryId} · {timestamp}
-                  </div>
+                    <span
+                      className="material-symbols-outlined"
+                      style={{ fontSize: "var(--icon-sm)" }}
+                    >
+                      refresh
+                    </span>
+                    New conversation
+                  </button>
                 </div>
               </div>
 
-              {/* Debate */}
-              <DebatePanel />
+              {turns.map((turn, i) => {
+                const isLatest = i === turns.length - 1;
+                const isActive = isLatest && !turn.done;
+                return (
+                  <TurnCard
+                    key={turn.id}
+                    turn={turn}
+                    isActive={isActive}
+                    instant={instant}
+                    showDebatePanel={isActive}
+                    onComplete={isActive ? activeOnComplete : undefined}
+                  />
+                );
+              })}
 
-              {/* Synthesis & Resolution */}
-              <div className="pl-4 md:pl-10">
-                <div
-                  className="border border-outline-variant bg-surface-container-lowest"
-                  style={{ paddingInline: "var(--space-6)", paddingBlock: "var(--space-6)" }}
-                >
-                  <div
-                    className="flex flex-wrap items-center border-b border-outline-variant"
-                    style={{
-                      marginBottom: "var(--space-5)",
-                      paddingBottom: "var(--space-4)",
-                      gap: "var(--space-3)",
-                    }}
-                  >
-                    <span
-                      className="material-symbols-outlined text-secondary"
-                      style={{ fontSize: "var(--icon-lg)" }}
-                    >
-                      verified
-                    </span>
-                    <span
-                      className="font-serif font-semibold text-on-surface"
-                      style={{ fontSize: "var(--text-h4)", lineHeight: 1.2 }}
-                    >
-                      Synthesis &amp; Resolution
-                    </span>
-                    {/* Status / cost pill — visible while streaming and
-                        flips to the final cost once the agent emits ``done``.
-                        Replaces the "Confidence: High" plank, which was a
-                        canned claim the pipeline doesn't actually compute. */}
-                    <AnswerStatusPill phase={phase} />
-                  </div>
-
-                  {/* Progressive loading indicator above the answer. */}
-                  <AgentProgress />
-
-                  <div
-                    className="space-y-4 text-on-surface"
-                    style={{ fontSize: 18, lineHeight: 1.65 }}
-                  >
-                    <AnswerStream
-                      question={submitted}
-                      asof={asof}
-                      lang="en"
-                      instant={instant}
-                      onComplete={handleAnswerComplete}
-                    />
-                  </div>
-
-                  {/* Action strip. Notes for future edits:
-                      - ``overflow-x-auto`` is intentionally NOT used here. It
-                        clips the History dropdown (which is absolute-
-                        positioned), which is why History silently broke when
-                        we previously had three buttons forcing horizontal
-                        scroll. Stay on a single line.
-                      - "Draft Memo" / "Share Citation" were stubbed-out
-                        affordances; removed until they wire to real handlers.
-                      - "New Query" is the primary action (most reached-for
-                        button), so it's filled (btn-primary) and on the
-                        left — first thing the eye lands on. */}
-                  <div className="mt-6 flex flex-wrap items-center gap-3 border-t border-outline-variant pb-2 pt-4">
-                    <button
-                      onClick={() => {
-                        setSubmitted(null);
-                        setQuestion("");
-                        reset();
-                      }}
-                      className="btn-primary btn-sm shrink-0"
-                    >
-                      <span className="material-symbols-outlined" style={{ fontSize: "var(--icon-sm)" }}>
-                        refresh
-                      </span>
-                      New Query
-                    </button>
-                    <HistoryButton
-                      entries={historyEntries}
-                      onRecall={recall}
-                      onRemove={removeHistory}
-                      onClear={clearHistory}
-                    />
-                    {/* Cost readout — also surfaced as a pill at the top of
-                        the card, but having it pinned to the action strip
-                        makes the per-query economics visible after the
-                        answer is read. */}
-                    <AnswerCostReadout className="ml-auto" />
-                  </div>
-                </div>
-              </div>
+              {/* Spacer so the sticky composer doesn't cover the latest turn. */}
+              <div ref={threadEndRef} style={{ height: 96 }} aria-hidden />
             </div>
           )}
         </div>
 
-        {/* ─── Side panel · Provenance Orbit ─── slim when empty, full when populated. */}
+        {/* ─── Side panel · Provenance Orbit ─── */}
         <aside className="w-full shrink-0 md:w-72 lg:w-80">
-          {/* EMPTY or WIRING UP: hairline card. Switches copy based on phase. */}
           {orbitNodes.length === 0 && (
             <div
               className="sticky top-24 border border-outline-variant bg-surface-container-lowest"
               style={{ padding: "var(--space-5)" }}
             >
-              <div
-                className="flex items-center"
-                style={{ gap: "var(--space-2)" }}
-              >
+              <div className="flex items-center" style={{ gap: "var(--space-2)" }}>
                 <span
                   className="material-symbols-outlined text-on-surface-variant"
                   style={{ fontSize: "var(--icon-sm)" }}
@@ -528,9 +488,7 @@ export default function AskPage() {
                   className="font-mono uppercase tracking-wider text-on-surface"
                   style={{ fontSize: "var(--text-overline)" }}
                 >
-                  {phase === "idle" || phase === "done"
-                    ? "Orbit ready"
-                    : "Wiring subgraph"}
+                  {phase === "idle" || phase === "done" ? "Orbit ready" : "Wiring subgraph"}
                 </h3>
               </div>
 
@@ -556,10 +514,8 @@ export default function AskPage() {
                       lineHeight: 1.55,
                     }}
                   >
-                    {phase === "starting" &&
-                      "Waiting for the first agent event..."}
-                    {phase === "planning" &&
-                      "Planner extracting entities + sub-questions"}
+                    {phase === "starting" && "Waiting for the first agent event..."}
+                    {phase === "planning" && "Planner extracting entities + sub-questions"}
                     {phase === "retrieving" && (
                       <>
                         Walking typed edges,{" "}
@@ -575,7 +531,6 @@ export default function AskPage() {
                       phase === "verifying") &&
                       "Subgraph ready, expanding panel..."}
                   </p>
-                  {/* Inline skeleton bars to telegraph imminent content. */}
                   <div
                     style={{
                       marginTop: "var(--space-4)",
@@ -610,7 +565,6 @@ export default function AskPage() {
             </div>
           )}
 
-          {/* POPULATED: full panel with graph/timeline toggle. */}
           {orbitNodes.length > 0 && (
             <div className="sticky top-24 border border-outline-variant bg-surface-container-lowest">
               <div
@@ -683,7 +637,7 @@ export default function AskPage() {
                   >
                     {debateActive
                       ? "Hierarchy: judicial precedent overrides administrative guidelines."
-                      : "Hover for a peek -- click any node or edge to pin the full Inspector."}
+                      : "Orbit tracks the latest turn. Hover for a peek -- click any node or edge to pin the full Inspector."}
                   </div>
                   <div
                     className="grid"
@@ -706,6 +660,33 @@ export default function AskPage() {
         </aside>
       </div>
 
+      {/* ─── Sticky bottom composer ─── chat state only. Backdrop blur so
+          the thread fades behind it instead of bleeding into the textarea. */}
+      {!isEmpty && (
+        <div
+          className="sticky bottom-0 z-20 border-t border-outline-variant bg-surface/85 backdrop-blur supports-[backdrop-filter]:bg-surface/70"
+          style={{ paddingBlock: "var(--space-4)" }}
+        >
+          <div className="mx-auto w-full max-w-6xl px-6">
+            <div className="md:pr-80 lg:pr-[336px]">
+              <Composer
+                question={question}
+                setQuestion={setQuestion}
+                onSubmit={() => submit()}
+                asof={asof}
+                variant="sticky"
+                disabled={isStreaming}
+                disabledReason={
+                  isStreaming
+                    ? "Streaming — wait for the current answer to finish"
+                    : undefined
+                }
+              />
+            </div>
+          </div>
+        </div>
+      )}
+
       <CitePopover />
       <Inspector />
       <Footer />
@@ -713,11 +694,335 @@ export default function AskPage() {
   );
 }
 
+/* ─────────────────────────────────────────────────────────────────────────
+   Components
+   ───────────────────────────────────────────────────────────────────────── */
+
+/** Composer in two visual modes:
+ *  - `hero`:    full three-strip card with meta pills (empty state)
+ *  - `sticky`:  slim single-line textarea + Ask button (bottom of chat)
+ */
+function Composer({
+  question,
+  setQuestion,
+  onSubmit,
+  asof,
+  variant,
+  disabled,
+  disabledReason,
+}: {
+  question: string;
+  setQuestion: (v: string) => void;
+  onSubmit: () => void;
+  asof: string;
+  variant: "hero" | "sticky";
+  disabled?: boolean;
+  disabledReason?: string;
+}) {
+  const placeholder =
+    variant === "hero"
+      ? "What is the withholding rate on key-personnel pay in 2026?"
+      : "Ask a follow-up… (Cmd + Enter to send)";
+
+  if (variant === "sticky") {
+    return (
+      <div className="border border-outline-variant bg-surface-container-lowest">
+        <div
+          className="flex items-end"
+          style={{
+            paddingInline: "var(--space-4)",
+            paddingBlock: "var(--space-3)",
+            gap: "var(--space-3)",
+          }}
+        >
+          <textarea
+            value={question}
+            onChange={(e) => {
+              setQuestion(e.target.value);
+              const el = e.currentTarget;
+              el.style.height = "auto";
+              el.style.height = Math.min(el.scrollHeight, 200) + "px";
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) onSubmit();
+            }}
+            aria-label="Follow-up question"
+            placeholder={placeholder}
+            rows={1}
+            disabled={disabled}
+            style={{ minHeight: 44, lineHeight: 1.4, fontSize: 17 }}
+            className="block w-full resize-none border-0 bg-transparent p-0 font-sans text-on-surface placeholder:text-on-surface-variant/60 focus:outline-none focus:ring-0 disabled:opacity-60"
+          />
+          <button
+            onClick={onSubmit}
+            disabled={disabled || !question.trim()}
+            className="btn-primary btn-sm shrink-0"
+            title={disabledReason}
+          >
+            {disabled ? "Streaming…" : "Ask"}
+            {!disabled && (
+              <span
+                className="material-symbols-outlined"
+                style={{ fontSize: "var(--icon-sm)" }}
+              >
+                send
+              </span>
+            )}
+          </button>
+        </div>
+        <div
+          className="flex items-center justify-between border-t border-outline-variant"
+          style={{
+            paddingInline: "var(--space-4)",
+            paddingBlock: "var(--space-2)",
+          }}
+        >
+          <span
+            className="font-mono uppercase tracking-wider text-on-surface-variant"
+            style={{ fontSize: "var(--text-overline)" }}
+          >
+            AS OF {asof.replace(/-/g, ".")} · context carries
+          </span>
+          <span
+            className="hidden font-mono text-on-surface-variant sm:flex"
+            style={{ fontSize: "var(--text-overline)" }}
+          >
+            <span
+              className="material-symbols-outlined"
+              style={{ fontSize: "var(--icon-xs)" }}
+            >
+              keyboard_command_key
+            </span>
+            + Enter
+          </span>
+        </div>
+      </div>
+    );
+  }
+
+  // hero variant
+  return (
+    <section className="border border-outline-variant bg-gradient-to-b from-surface-container-lowest to-surface-container-low/40">
+      <div
+        className="flex items-center justify-between border-b border-outline-variant"
+        style={{ paddingInline: "var(--space-5)", paddingBlock: "var(--space-2)" }}
+      >
+        <div className="flex flex-wrap items-center" style={{ gap: "var(--space-2)" }}>
+          <span className="meta-pill">AS OF {asof.replace(/-/g, ".")}</span>
+          <span className="meta-pill">EN-FI</span>
+          <span
+            className="meta-pill"
+            style={{ color: "var(--color-secondary)", borderColor: "var(--color-secondary)" }}
+            title="1,967,776 nodes + 2,250,021 edges (96.9% resolved)"
+          >
+            1.97M N · 2.25M E
+          </span>
+        </div>
+        <div
+          className="hidden items-center font-mono text-on-surface-variant sm:flex"
+          style={{ gap: "var(--space-2)", fontSize: "var(--text-overline)" }}
+        >
+          <span className="material-symbols-outlined" style={{ fontSize: "var(--icon-xs)" }}>
+            keyboard_command_key
+          </span>
+          + Enter
+        </div>
+      </div>
+
+      <div style={{ paddingInline: "var(--space-6)", paddingBlock: "var(--space-6)" }}>
+        <textarea
+          value={question}
+          onChange={(e) => {
+            setQuestion(e.target.value);
+            const el = e.currentTarget;
+            el.style.height = "auto";
+            el.style.height = Math.min(el.scrollHeight, 280) + "px";
+          }}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) onSubmit();
+          }}
+          aria-label="Question"
+          placeholder={placeholder}
+          rows={1}
+          style={{ minHeight: 72, lineHeight: 1.35, fontSize: 26 }}
+          className="block w-full resize-none border-0 bg-transparent p-0 font-serif text-on-surface placeholder:font-serif placeholder:font-normal placeholder:italic placeholder:text-on-surface-variant/55 focus:outline-none focus:ring-0"
+        />
+      </div>
+
+      <div
+        className="flex items-center justify-between border-t border-outline-variant"
+        style={{ paddingInline: "var(--space-5)", paddingBlock: "var(--space-3)" }}
+      >
+        <span
+          className="font-mono uppercase tracking-wider text-on-surface-variant"
+          style={{ fontSize: "var(--text-overline)" }}
+        >
+          {question.trim() ? `${question.trim().length} chars` : "Cmd + Enter to ask"}
+        </span>
+        <button
+          onClick={onSubmit}
+          disabled={!question.trim()}
+          className="btn-primary btn-sm shrink-0"
+        >
+          Ask
+          <span className="material-symbols-outlined" style={{ fontSize: "var(--icon-sm)" }}>
+            send
+          </span>
+        </button>
+      </div>
+    </section>
+  );
+}
+
+/** One turn in the conversation thread. Renders the user question header
+ *  + a Synthesis card. The Synthesis card either streams (AnswerStream)
+ *  or shows the frozen answer (RenderedAnswer). */
+function TurnCard({
+  turn,
+  isActive,
+  instant,
+  showDebatePanel,
+  onComplete,
+}: {
+  turn: ChatTurn;
+  isActive: boolean;
+  instant: boolean;
+  showDebatePanel: boolean;
+  onComplete?: (answer: string) => void;
+}) {
+  const phase = useGraphStore((s) => s.phase);
+  const priorTurnCount = turn.history.length / 2; // history is user+assistant pairs
+
+  return (
+    <div className="flex flex-col" style={{ gap: "var(--space-5)" }}>
+      {/* User question header */}
+      <div
+        className="flex items-start pl-4 md:pl-10"
+        style={{ gap: "var(--space-4)" }}
+      >
+        <div
+          className="flex shrink-0 items-center justify-center border border-outline-variant bg-surface-variant"
+          style={{ width: 36, height: 36 }}
+        >
+          <span
+            className="material-symbols-outlined text-on-surface-variant"
+            style={{ fontSize: "var(--icon-md)" }}
+          >
+            person
+          </span>
+        </div>
+        <div className="flex-1" style={{ paddingTop: 2 }}>
+          <div
+            className="font-serif leading-snug text-on-surface"
+            style={{ fontSize: 22, lineHeight: 1.3 }}
+          >
+            {turn.question}
+          </div>
+          <div
+            className="font-mono text-on-surface-variant"
+            style={{
+              marginTop: "var(--space-3)",
+              fontSize: "var(--text-overline)",
+              letterSpacing: "0.05em",
+            }}
+          >
+            Q-ID: {turn.id} · {turn.timestamp}
+            {priorTurnCount > 0 && (
+              <span
+                title="Prior turns sent to the model as conversation context"
+                style={{ marginLeft: 8 }}
+              >
+                · with {priorTurnCount} prior{" "}
+                {priorTurnCount === 1 ? "turn" : "turns"} as context
+              </span>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* Debate panel — only on the active turn (it consumes live SSE events). */}
+      {showDebatePanel && <DebatePanel />}
+
+      {/* Synthesis card */}
+      <div className="pl-4 md:pl-10">
+        <div
+          className="border border-outline-variant bg-surface-container-lowest"
+          style={{ paddingInline: "var(--space-6)", paddingBlock: "var(--space-6)" }}
+        >
+          <div
+            className="flex flex-wrap items-center border-b border-outline-variant"
+            style={{
+              marginBottom: "var(--space-5)",
+              paddingBottom: "var(--space-4)",
+              gap: "var(--space-3)",
+            }}
+          >
+            <span
+              className="material-symbols-outlined text-secondary"
+              style={{ fontSize: "var(--icon-lg)" }}
+            >
+              verified
+            </span>
+            <span
+              className="font-serif font-semibold text-on-surface"
+              style={{ fontSize: "var(--text-h4)", lineHeight: 1.2 }}
+            >
+              Synthesis &amp; Resolution
+            </span>
+            {isActive ? (
+              <AnswerStatusPill phase={phase} />
+            ) : (
+              <span
+                className="meta-pill ml-auto"
+                style={{
+                  color: "var(--color-secondary)",
+                  borderColor: "var(--color-secondary)",
+                }}
+                title="Completed turn"
+              >
+                {turn.costCents && turn.costCents > 0
+                  ? formatCents(turn.costCents)
+                  : "Done"}
+              </span>
+            )}
+          </div>
+
+          {/* Progressive loading indicator — only while the turn is active. */}
+          {isActive && <AgentProgress />}
+
+          <div
+            className="space-y-4 text-on-surface"
+            style={{ fontSize: 18, lineHeight: 1.65 }}
+          >
+            {isActive ? (
+              <AnswerStream
+                question={turn.question}
+                asof={turn.asof}
+                lang={turn.lang}
+                mode={turn.mode}
+                instant={instant}
+                history={turn.history}
+                onComplete={onComplete}
+              />
+            ) : turn.answer ? (
+              <RenderedAnswer answer={turn.answer} />
+            ) : (
+              <p
+                className="font-sans italic text-on-surface-variant"
+                style={{ fontSize: "var(--text-body-sm)" }}
+              >
+                (no answer — stream was aborted)
+              </p>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /** Pill at the top-right of the synthesis card. While the agent is
- *  working, shows "Streaming…". On done, shows the cost. The previous
- *  copy ("Confidence: High") was a hard-coded claim the pipeline doesn't
- *  compute — replacing it with cost surfaces a real signal in the same
- *  visual slot. */
+ *  working, shows "Streaming…". On done, shows the cost. */
 function AnswerStatusPill({ phase }: { phase: string }) {
   const cents = useGraphStore((s) => s.costCents);
   const done = phase === "done";
@@ -735,33 +1040,6 @@ function AnswerStatusPill({ phase }: { phase: string }) {
     >
       {cents > 0 ? formatCents(cents) : "Done"}
     </span>
-  );
-}
-
-/** Cost label sitting in the action strip under the answer. Stays low-key
- *  until the agent finishes, then shows the final cents. Pinned to the
- *  right via ``ml-auto`` from the caller. */
-function AnswerCostReadout({ className }: { className?: string }) {
-  const cents = useGraphStore((s) => s.costCents);
-  if (cents <= 0) return null;
-  return (
-    <div
-      className={
-        "flex items-baseline gap-2 font-mono text-on-surface-variant " +
-        (className ?? "")
-      }
-      title="DeepSeek V4 Pro · estimated from input+output tokens, cache-miss price"
-    >
-      <span
-        className="uppercase tracking-wider"
-        style={{ fontSize: "var(--text-overline)" }}
-      >
-        cost
-      </span>
-      <span style={{ fontSize: "var(--text-body-sm)", color: "var(--color-on-surface)" }}>
-        {formatCents(cents)}
-      </span>
-    </div>
   );
 }
 

@@ -5,7 +5,7 @@ import { usePathname } from "next/navigation";
 
 /**
  * Editorial top bar - sticky surface with backdrop-blur, Material icon brand
- * mark, mono nav links, FI · SV · EN language hint.
+ * mark, mono nav links.
  *
  * Active-state matching: exact match for `/`, prefix match for everything
  * else - so `/ask?demo=q4` still highlights `Ask` and `/eval/audit` still
@@ -68,9 +68,6 @@ export function Header() {
           })}
         </nav>
 
-        <div className="hidden font-mono text-xs tracking-wider text-on-surface-variant md:block">
-          FI · SV · EN
-        </div>
       </div>
     </header>
   );

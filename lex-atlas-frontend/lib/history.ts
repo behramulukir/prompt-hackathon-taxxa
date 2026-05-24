@@ -13,9 +13,33 @@
  *     normal recent-files list.
  *   - We save on the agent's `done` event (passed via `push`), so failed
  *     or aborted queries don't pollute the history.
+ *   - Each completed entry carries a `cached` snapshot of the answer +
+ *     orbit subgraph + debate (v2 schema). Recalling an entry can then
+ *     re-render the synthesis instantly without re-running the pipeline
+ *     and without re-billing.
  */
 
 import { useCallback, useEffect, useState } from "react";
+import type { OrbitNode, OrbitEdge, DebateTrace } from "@/lib/types";
+
+/** Frozen snapshot of everything the synthesis view needs to redisplay a
+ *  past query: the streamed answer text (still carrying [cite:node:X]
+ *  tokens), the orbit subgraph that was wired up while the agent ran,
+ *  any detected conflict pairs, and the debate transcript when one
+ *  fired. Big chunks of state but the cap on MAX entries keeps the
+ *  total localStorage footprint bounded. */
+export interface CachedAnswer {
+  /** Streamed answer text (with [cite:node:X]…[/cite] tokens intact). */
+  answer: string;
+  /** Orbit subgraph (≤ 12 nodes) at done-time. */
+  orbitNodes: OrbitNode[];
+  /** Orbit edges (typed relations). */
+  orbitEdges: OrbitEdge[];
+  /** Verifier-flagged conflict pairs. Empty list when none. */
+  conflictPairs: [string, string][];
+  /** Debate transcript when one fired. */
+  debate?: DebateTrace | null;
+}
 
 export interface HistoryEntry {
   /** Stable query id (queryId in /ask/page.tsx). */
@@ -31,9 +55,19 @@ export interface HistoryEntry {
   costCents?: number;
   /** Optional: was a debate detected and resolved? */
   hadDebate?: boolean;
+  /** v2 — frozen snapshot of the rendered synthesis. Missing on entries
+   *  written by older builds; recall() falls back to a fresh run when
+   *  absent. */
+  cached?: CachedAnswer;
 }
 
-const KEY = "lex-atlas:query-history:v1";
+// v2: payload schema now includes ``cached``. Versioned key means old v1
+// entries are silently dropped on first read (no migration needed — they
+// were never load-bearing across sessions).
+const KEY = "lex-atlas:query-history:v2";
+// Older keys we want to cleanly forget so the dropdown doesn't pick up
+// stale rows from a previous build.
+const LEGACY_KEYS = ["lex-atlas:query-history:v1"];
 const MAX = 50;
 
 function isEntry(v: unknown): v is HistoryEntry {
@@ -86,6 +120,14 @@ export function useQueryHistory() {
 
   // Read once on mount + listen for cross-tab updates.
   useEffect(() => {
+    // One-shot legacy-key cleanup: drop pre-v2 history so older entries
+    // (no ``cached`` payload, possibly with the duplicate-id bug) don't
+    // resurface in the dropdown.
+    if (typeof window !== "undefined") {
+      for (const k of LEGACY_KEYS) {
+        try { window.localStorage.removeItem(k); } catch { /* ignore */ }
+      }
+    }
     setEntries(read());
     const onStorage = (e: StorageEvent) => {
       if (e.key === KEY) setEntries(read());

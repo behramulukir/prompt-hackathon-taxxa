@@ -96,6 +96,38 @@ export interface OrbitEdge {
   isConflict?: boolean;
 }
 
+/** One prior conversation turn — OpenAI-format role/content pair.
+ *  Sent in the /api/ask request body on every follow-up. Mirror of
+ *  ``ChatMessage`` in src/api/server.py. */
+export interface ChatMessage {
+  role: "user" | "assistant";
+  content: string;
+}
+
+/** One question + its streamed answer in the chat thread.
+ *  Owned by `<AskPage>`; pushed on submit, mutated on `done`. */
+export interface ChatTurn {
+  /** Stable id for React keys + history correlation. */
+  id: string;
+  question: string;
+  asof: string;
+  lang: "fi" | "sv" | "en";
+  mode: "ask" | "draft_email" | "debate_only";
+  /** HH:MM at submit-time, for the meta line. */
+  timestamp: string;
+  /** Snapshot of `history` sent to /api/ask for this turn — all prior turns
+   *  flattened to user/assistant pairs. Stored so a re-run could replay the
+   *  exact context the model saw. */
+  history: ChatMessage[];
+  /** Streamed answer text (with [cite:node:X]…[/cite] tokens). Set when
+   *  AnswerStream's onComplete fires; undefined while streaming. */
+  answer?: string;
+  /** Final cost in cents reported by the stream. */
+  costCents?: number;
+  /** Whether the stream finished cleanly. */
+  done?: boolean;
+}
+
 /** TextUnit payload returned by the `/api/excerpt` endpoint for the Citation Drawer. */
 export interface ExcerptResponse {
   nodeId: string;

@@ -9,7 +9,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useGraphStore } from "@/lib/store";
 import { colorForKind } from "@/lib/colors";
-import type { AgentEvent, NodeKind } from "@/lib/types";
+import type { AgentEvent, ChatMessage, NodeKind } from "@/lib/types";
 
 interface AnswerStreamProps {
   question: string;
@@ -18,13 +18,23 @@ interface AnswerStreamProps {
   mode?: "ask" | "draft_email" | "debate_only";
   /** Skip SSE timing delays — used by screenshot/e2e tests. */
   instant?: boolean;
-  onComplete?: () => void;
+  /** Prior turns as OpenAI-format messages. Empty/undefined on first turn. */
+  history?: ChatMessage[];
+  /** Replay an already-completed answer instead of hitting /api/ask.
+   *  When set, the SSE fetch is skipped, ``rawAnswer`` is hydrated from
+   *  this string, phase flips to "done", and ``onComplete`` fires once
+   *  on mount. Used by the history-recall flow so users don't re-pay
+   *  for an answer they already have. */
+  cachedAnswer?: string;
+  /** Fires once on `done`. Receives the final streamed answer (with cite
+   *  tokens intact) so the parent can freeze it into the chat thread. */
+  onComplete?: (answer: string) => void;
 }
 
 const REFLECTION_TOKEN_RE = /\[(?:IsRel|IsSup|IsUse):[^\]]+\]/g;
 const CITE_TOKEN_RE = /\[cite:node:([^\]]+)\]([^[]*?)\[\/cite\]/g;
 
-export function AnswerStream({ question, asof, lang, mode = "ask", instant = false, onComplete }: AnswerStreamProps) {
+export function AnswerStream({ question, asof, lang, mode = "ask", instant = false, history, cachedAnswer, onComplete }: AnswerStreamProps) {
   const [rawAnswer, setRawAnswer] = useState("");
   const [done, setDone] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -54,6 +64,19 @@ export function AnswerStream({ question, asof, lang, mode = "ask", instant = fal
   useEffect(() => {
     if (!question) return;
 
+    // Cache-replay path: a HistoryRecall flow supplied the final answer
+    // text. Hydrate the renderer with it, mark phase=done, and fire
+    // onComplete on mount. We deliberately skip the SSE fetch entirely
+    // so the user isn't re-billed for an answer they already have.
+    if (cachedAnswer !== undefined) {
+      setRawAnswer(cachedAnswer);
+      setDone(true);
+      setError(null);
+      setPhase("done");
+      onComplete?.(cachedAnswer);
+      return;
+    }
+
     const ac = new AbortController();
     abortRef.current = ac;
     setRawAnswer("");
@@ -61,12 +84,25 @@ export function AnswerStream({ question, asof, lang, mode = "ask", instant = fal
     setError(null);
     setPhase("starting");
 
+    // Local accumulator. setRawAnswer is async + batched, so we can't read
+    // back the post-update value synchronously inside `dispatch`. Keep our
+    // own copy here so the `done` handler can hand the FULL streamed answer
+    // back to the parent (which freezes it into the chat thread).
+    let accumulatedAnswer = "";
+
     const run = async () => {
       try {
         const res = await fetch("/api/ask", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ question, asof, lang, mode, instant }),
+          body: JSON.stringify({
+            question,
+            asof,
+            lang,
+            mode,
+            instant,
+            history: history ?? [],
+          }),
           signal: ac.signal,
         });
         if (!res.ok || !res.body) throw new Error(`Upstream ${res.status}`);
@@ -149,6 +185,7 @@ export function AnswerStream({ question, asof, lang, mode = "ask", instant = fal
         case "draft_token":
           setPhase("drafting");
           addDraftChars(e.text.length);
+          accumulatedAnswer += e.text;
           setRawAnswer((r) => r + e.text);
           break;
         case "claim_verified":
@@ -163,7 +200,7 @@ export function AnswerStream({ question, asof, lang, mode = "ask", instant = fal
         case "done":
           setPhase("done");
           setDone(true);
-          onComplete?.();
+          onComplete?.(accumulatedAnswer);
           break;
         case "error":
           setPhase("error");
@@ -175,7 +212,7 @@ export function AnswerStream({ question, asof, lang, mode = "ask", instant = fal
     run();
     return () => ac.abort();
   }, [
-    question, asof, lang, mode, instant,
+    question, asof, lang, mode, instant, history,
     pushHighlightedNode, setOrbit, mergeOrbitNodeKinds,
     setDimmed, setCenterNodeId,
     setConflictPairs, setDebate, setDebateActive,
@@ -286,6 +323,49 @@ export function AnswerStream({ question, asof, lang, mode = "ask", instant = fal
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+/**
+ * Static renderer for an already-streamed answer (no SSE, no skeleton, no
+ * cursor). Used by completed turns in the chat thread — they keep their
+ * clickable cite anchors, but don't re-run the pipeline. Reuses the same
+ * `renderAnswer` machinery as the streaming variant so hover/click still
+ * flips the global `hoveredNodeId` / `selectedNodeId`.
+ */
+export function RenderedAnswer({ answer }: { answer: string }) {
+  const setHoveredNodeId = useGraphStore((s) => s.setHoveredNodeId);
+  const setHoverAnchor = useGraphStore((s) => s.setHoverAnchor);
+  const setSelectedNodeId = useGraphStore((s) => s.setSelectedNodeId);
+  const nodeKind = useGraphStore((s) => s.nodeKind);
+
+  const handleHover = useCallback(
+    (
+      citedNodeId: string | null,
+      anchor: { x: number; y: number; w?: number; h?: number } | null
+    ) => {
+      setHoveredNodeId(citedNodeId);
+      setHoverAnchor(anchor);
+    },
+    [setHoveredNodeId, setHoverAnchor]
+  );
+  const handleClick = useCallback(
+    (citedNodeId: string) => setSelectedNodeId(citedNodeId),
+    [setSelectedNodeId]
+  );
+
+  const rendered = useMemo(
+    () => renderAnswer(answer, nodeKind, handleHover, handleClick),
+    [answer, nodeKind, handleHover, handleClick]
+  );
+
+  return (
+    <div
+      className="font-sans text-on-surface"
+      style={{ fontSize: 17, lineHeight: 1.65 }}
+    >
+      {rendered}
     </div>
   );
 }

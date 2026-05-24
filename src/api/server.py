@@ -185,6 +185,18 @@ async def _on_worker(fn: Callable[[], T]) -> T:
 # ----------------------------------------------------------------------
 
 
+class ChatMessage(BaseModel):
+    """One prior conversation turn — OpenAI-format role/content pair.
+
+    The frontend builds this list from completed turns and sends it on every
+    follow-up. The current question is sent separately as ``question``; this
+    history is everything BEFORE it.
+    """
+
+    role: Literal["user", "assistant"]
+    content: str
+
+
 class AskBody(BaseModel):
     """Body of POST /ask.
 
@@ -198,6 +210,12 @@ class AskBody(BaseModel):
     lang: Literal["fi", "sv", "en"] = "en"
     mode: Literal["ask", "draft_email", "debate_only"] = "ask"
     instant: bool = False
+
+    # Prior conversation turns for multi-turn chat. Empty for the first turn.
+    # Each follow-up retrieves fresh sources against the current question;
+    # history feeds the LLM context for pronouns / referential follow-ups
+    # ("and what about asetus 1535/1992?", "explain that exception again").
+    history: list[ChatMessage] = Field(default_factory=list)
 
     # Optional per-request overrides for the retrieval depth + context size.
     # Defaults mirror ``python -m scripts.ask -k 50 -n 12`` — the command the
@@ -502,8 +520,18 @@ async def _ask_stream(body: AskBody, request: Request) -> AsyncIterator[bytes]:
 
     # Stage 6 — generate.
     t = time.perf_counter()
+    history_payload = [
+        {"role": m.role, "content": m.content} for m in body.history
+    ]
+    if history_payload:
+        log.info(
+            "generate · prior turns=%d (user/assistant pairs)",
+            len(history_payload) // 2,
+        )
     try:
-        gen = await _on_worker(lambda: generate(body.question, context))
+        gen = await _on_worker(
+            lambda: generate(body.question, context, history=history_payload)
+        )
     except Exception as e:
         log.exception("generate FAILED")
         yield _sse({"type": "error", "message": f"Generation failed: {e}"})

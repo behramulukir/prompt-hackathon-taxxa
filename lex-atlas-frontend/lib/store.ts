@@ -140,6 +140,17 @@ interface GraphStore {
   addDraftChars: (n: number) => void;
   setLookups: (nodeIdToIndex: Record<string, number>, nodeKind: Record<string, NodeKind>) => void;
   reset: () => void;
+  /** Restore the synthesis view from a cached history entry. Skips the
+   *  whole SSE flow — sets the orbit, debate, conflict pairs, and cost
+   *  directly into the store and flips phase to "done" so the answer
+   *  card renders the cached state. */
+  restoreFromCache: (snapshot: {
+    orbitNodes: OrbitNode[];
+    orbitEdges: OrbitEdge[];
+    conflictPairs: [string, string][];
+    debate?: DebateTrace | null;
+    costCents?: number;
+  }) => void;
 }
 
 const DEFAULT_ASOF = new Date().toISOString().slice(0, 10);
@@ -237,5 +248,34 @@ export const useGraphStore = create<GraphStore>((set, get) => ({
       plannedSubQuestions: 0,
       plannedEntities: 0,
       draftCharsReceived: 0,
+    }),
+  restoreFromCache: (snap) =>
+    set({
+      orbitNodes: snap.orbitNodes,
+      orbitEdges: snap.orbitEdges,
+      centerNodeId: snap.orbitNodes.find((n) => n.isCenter)?.id ?? null,
+      // Carry the kind map so cite-anchors in the cached answer get
+      // colored correctly when the AnswerStream replay re-renders them.
+      nodeKind: Object.fromEntries(snap.orbitNodes.map((n) => [n.id, n.kind])),
+      conflictPairs: snap.conflictPairs ?? [],
+      debate: snap.debate ?? null,
+      debateActive: !!snap.debate,
+      debateMessages: [],
+      costCents: snap.costCents ?? 0,
+      dimmed: true,
+      // Final phase so AgentProgress vanishes and the synthesis pill
+      // flips to the cost glyph straight away.
+      phase: "done",
+      walkedCount: 0,
+      plannedSubQuestions: 0,
+      plannedEntities: 0,
+      draftCharsReceived: 0,
+      highlightedIndices: [],
+      focusedIndices: [],
+      hoveredNodeId: null,
+      hoveredEdgeKey: null,
+      selectedNodeId: null,
+      selectedEdgeKey: null,
+      hoverAnchor: null,
     }),
 }));

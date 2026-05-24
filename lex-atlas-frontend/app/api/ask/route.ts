@@ -22,6 +22,11 @@ export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 export const maxDuration = 60;
 
+interface ChatMessage {
+  role: "user" | "assistant";
+  content: string;
+}
+
 interface AskBody {
   question: string;
   asof: string;
@@ -29,6 +34,9 @@ interface AskBody {
   mode?: "ask" | "draft_email" | "debate_only";
   /** When true, fixture replay skips all setTimeout delays. Used for screenshots / e2e. */
   instant?: boolean;
+  /** Prior conversation turns. Empty/undefined on first turn. The sidecar's
+   *  ``AskBody`` accepts the same shape and forwards into ``generate()``. */
+  history?: ChatMessage[];
 }
 
 export async function POST(req: NextRequest) {
