@@ -1,0 +1,2 @@
+config_id,filter_infer,query_rewrite,vector_retrieve,rerank,graph_expand,cross_encoder,vector_rerank,assemble,generate,total
+v1-current,0.0000,6153.0000,1712.0000,17.0000,,,,7.0000,21341.0000,29409.0000

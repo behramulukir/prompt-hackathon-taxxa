@@ -1,0 +1,69 @@
+{
+  "configs": [
+    {
+      "id": "v1-current",
+      "pipeline": "v1",
+      "rerank": "metadata",
+      "query_rewrite": true,
+      "hybrid": true,
+      "k": 20,
+      "n": 8,
+      "notes": "Current v1 production default. Reference baseline."
+    },
+    {
+      "id": "v1-bare",
+      "pipeline": "v1",
+      "rerank": "metadata",
+      "query_rewrite": false,
+      "hybrid": false,
+      "k": 20,
+      "n": 8,
+      "notes": "v1 without Plan A (query rewrite) or Plan B (hybrid). Pre-step-10 baseline."
+    },
+    {
+      "id": "v2-cross",
+      "pipeline": "v2",
+      "rerank": "cross_encoder",
+      "query_rewrite": true,
+      "hybrid": true,
+      "n": 8,
+      "notes": "Current v2 production default. Strategy router + graph BFS + cross-encoder rerank."
+    },
+    {
+      "id": "v2-vector",
+      "pipeline": "v2",
+      "rerank": "vector",
+      "query_rewrite": true,
+      "hybrid": true,
+      "n": 8,
+      "notes": "v2 with graph expansion but vector-similarity rerank instead of cross-encoder. Isolates graph contribution from cross-encoder noise."
+    },
+    {
+      "id": "v2-no-rewrite",
+      "pipeline": "v2",
+      "rerank": "cross_encoder",
+      "query_rewrite": false,
+      "hybrid": true,
+      "n": 8,
+      "notes": "v2 without Plan A. Attributes query-rewrite contribution."
+    },
+    {
+      "id": "v2-no-hybrid",
+      "pipeline": "v2",
+      "rerank": "cross_encoder",
+      "query_rewrite": true,
+      "hybrid": false,
+      "n": 8,
+      "notes": "v2 without Plan B (hybrid). Attributes hybrid (BM25+vector RRF) contribution."
+    }
+  ],
+  "tiers": {
+    "A": ["v1-current", "v2-cross", "v2-vector"],
+    "B": ["v1-bare", "v2-no-rewrite", "v2-no-hybrid"]
+  },
+  "defaults": {
+    "vector_db_path": "output/lancedb",
+    "graph_db_path": "output/graph.db",
+    "judge_model": "deepseek-ai/DeepSeek-V4-Pro"
+  }
+}

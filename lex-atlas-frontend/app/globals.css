@@ -282,6 +282,41 @@
   .btn-secondary:hover {
     background: var(--color-surface-variant);
   }
+  /* Ghost button — outlined, transparent fill, fills on hover. Visually
+     a secondary action that shouldn't compete with btn-primary. Used by
+     "New conversation" next to <HistoryButton>; both read as siblings. */
+  .btn-ghost {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+    padding: 1rem 2rem;
+    background: transparent;
+    color: var(--color-on-surface);
+    border: 1px solid var(--color-outline-variant);
+    font-family: var(--font-mono);
+    font-size: 14px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    transition: background var(--dur-medium), border-color var(--dur-medium),
+      color var(--dur-medium);
+    cursor: pointer;
+  }
+  .btn-ghost:hover {
+    background: var(--color-surface-container);
+    border-color: var(--color-outline);
+    color: var(--color-on-surface);
+  }
+  .btn-ghost:disabled {
+    color: var(--color-on-surface-variant);
+    border-color: var(--color-outline-variant);
+    cursor: not-allowed;
+    opacity: 0.6;
+  }
+  .btn-ghost:disabled:hover {
+    background: transparent;
+    border-color: var(--color-outline-variant);
+  }
   .btn-sm {
     padding: 0.5rem 1rem;
     font-size: 12px;

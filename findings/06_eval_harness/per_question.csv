@@ -1,0 +1,2 @@
+question_id,tier,gold_publishers,v1-current_error,v1-current_key_fact_recall,v1-current_numeric_recall,v1-current_cite_prec,v1-current_cite_recall,v1-current_judge_correctness,v1-current_judge_grounding,v1-current_judge_completeness
+Q1,basic,vero,,1.0000,1.0000,0.5000,1.0000,,,

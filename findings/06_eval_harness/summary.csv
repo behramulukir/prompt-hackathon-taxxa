@@ -1,0 +1,4 @@
+config_id,tier_group,n_questions,n_errors,n_refusals,key_fact_recall_mean,numeric_recall_mean,citation_publisher_precision_mean,citation_publisher_recall_mean,judge_correctness_mean,judge_grounding_mean,judge_completeness_mean,latency_p50_ms,latency_p95_ms,total_latency_ms_sum,generate_ms_mean,retrieve_ms_mean,rerank_ms_mean
+v1-current,all,1,0,0,1.0000,1.0000,0.5000,1.0000,,,,29409.0000,29409.0000,29409.0000,21341.0000,1712.0000,17.0000
+v1-current,Q-set,1,0,0,1.0000,1.0000,0.5000,1.0000,,,,29409.0000,29409.0000,29409.0000,21341.0000,1712.0000,17.0000
+v1-current,basic,1,0,0,1.0000,1.0000,0.5000,1.0000,,,,29409.0000,29409.0000,29409.0000,21341.0000,1712.0000,17.0000
