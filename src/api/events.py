@@ -1,0 +1,256 @@
+"""AgentEvent builders — keep the SSE wire format in lockstep with the frontend.
+
+The TypeScript counterpart lives at ``lex-atlas-frontend/lib/types.ts``
+(``AgentEvent`` union). Any field renamed or added here must be mirrored
+there or the frontend's ``dispatch()`` in ``AnswerStream.tsx`` will silently
+drop the event.
+
+Two mappings live in this module:
+
+* ``node_kind_for``  — the SECTION/LAW/GUIDE/CASE/... NodeType plus
+  ``source_subcorpus`` collapse into the 11 frontend NodeKinds used to color
+  nodes in the constellation/orbit.
+* ``authority_rank_for_ui`` — the corpus's authority_rank is 0-100; the
+  frontend's ``OrbitNode.authorityRank`` is a 1-8 lattice. We bucket so
+  KHO/laki/vero-ohje land on visually distinct tiers without re-tuning.
+"""
+from __future__ import annotations
+
+from typing import Any, Iterable
+
+from src.indexing.graph_store import GraphStore
+from src.models import Node
+from src.retrieval.assemble import AssembledContext, Source
+
+# Edge types we surface as orbit arcs. Matches assemble.RENDERED_EDGE_TYPES
+# so the orbit reads like a compact preview of the assembled context.
+ORBIT_EDGE_TYPES: tuple[str, ...] = ("cites", "interprets", "amends", "defines")
+
+
+# ---------------------------------------------------------------------------
+# kind / authority mapping
+# ---------------------------------------------------------------------------
+
+
+def node_kind_for(node_type: str | None, source_subcorpus: str | None) -> str:
+    """Map (NodeType, SourceSubcorpus) → frontend NodeKind.
+
+    Subcorpus wins when present — a SECTION inside a KHO ruling should
+    paint as a "case" node, not a "ctv". Falls through to ``work`` when
+    everything is unknown so the UI always has a renderable color.
+    """
+    sub = (source_subcorpus or "").lower()
+    if sub == "kho":
+        return "case"
+    if sub.startswith("vero_"):
+        return "guidance"
+    if sub == "treaty":
+        return "work"
+
+    nt = (node_type or "").upper()
+    if nt == "LAW":
+        return "work"
+    if nt in {"SECTION", "SUBSECTION", "ITEM", "DEFINITION"}:
+        return "ctv"
+    if nt == "CHAPTER":
+        return "component"
+    if nt == "AMENDMENT_BLOCK":
+        return "action"
+    if nt == "GUIDE":
+        return "guidance"
+    if nt == "CASE":
+        return "case"
+    if nt == "TREATY":
+        return "work"
+    return "work"
+
+
+def authority_rank_for_ui(rank: int | None) -> int:
+    """Bucket corpus authority_rank (0-100) into the UI lattice (1-8).
+
+    The corpus ranks roughly: laki=80, asetus=60, KHO=70, vero_ohje=40,
+    vero_kannanotto=30, vero_paatos=50. The 1-8 lattice is what the
+    OrbitGraph reads for the priority halo.
+    """
+    if rank is None:
+        return 4
+    # Map 0..100 -> 1..8, clamp.
+    bucket = int(round(rank / 12.5)) + 1
+    return max(1, min(8, bucket))
+
+
+# ---------------------------------------------------------------------------
+# Source → OrbitNode / OrbitEdge
+# ---------------------------------------------------------------------------
+
+
+def _short_label(section_id: str, title: str | None, node_label: str | None) -> str:
+    """Build a single-line label for the orbit chip.
+
+    Preference: explicit node label (``§ 3``) prepended to title; fall back
+    to title; fall back to the trailing ID segment so the chip is never
+    empty.
+    """
+    title = (title or "").strip()
+    node_label = (node_label or "").strip()
+    if node_label and title:
+        return f"{node_label} · {title}"
+    if title:
+        return title
+    if node_label:
+        return node_label
+    tail = section_id.split("/")[-1]
+    return tail or section_id
+
+
+def build_orbit(
+    context: AssembledContext,
+    *,
+    graph: GraphStore,
+    cited_chunk_ids: Iterable[str],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Source]]:
+    """Render the assembled context as the orbit payload.
+
+    Returns (orbit_nodes, orbit_edges, source_by_chunk_id). The third value is
+    a small index callers reuse for citation rewriting.
+
+    A source is marked ``isCenter=True`` when it tops the rerank list — that
+    becomes the centerpiece of the OrbitGraph. Anything in ``cited_chunk_ids``
+    is also marked active so the answer's cited sources sit at the front of
+    the visual stack.
+    """
+    cited = set(cited_chunk_ids)
+    nodes: list[dict[str, Any]] = []
+    section_to_chunk: dict[str, str] = {}
+    source_by_chunk: dict[str, Source] = {}
+
+    for i, src in enumerate(context.sources):
+        source_by_chunk[src.chunk_id] = src
+        section_to_chunk[src.section_id] = src.chunk_id
+
+        # Look up the section node for title/label/kind.
+        node: Node | None = graph.get_node(src.section_id)
+        title = getattr(node, "title", None) if node else None
+        label_field = getattr(node, "label", None) if node else None
+        node_type = node.type if node else None
+
+        # Pull subcorpus + flags off the chunk header that the rerank step
+        # already stashed onto the Source's rendered_block — but we have it
+        # via the corpus metadata too. Cheapest read: hit the graph node.
+        meta = node.metadata if node else None
+        in_force = bool(getattr(meta, "in_force", None)) if meta else True
+        authority_rank = getattr(meta, "authority_rank", None) if meta else None
+        source_field = getattr(node, "source", None) if node else None
+        # source_subcorpus isn't reliably round-tripped through the graph
+        # store (it's "laki" by default there). Sniff the chunk id when
+        # the graph node didn't carry one.
+        subcorpus = _sniff_subcorpus(src.chunk_id, source_field)
+
+        nodes.append(
+            {
+                "id": src.chunk_id,
+                "kind": node_kind_for(node_type, subcorpus),
+                "label": _short_label(src.section_id, title, label_field),
+                "authorityRank": authority_rank_for_ui(authority_rank),
+                "isActive": in_force is not False,
+                "isCenter": i == 0,
+                "tValid": (
+                    meta.publication_date.isoformat()
+                    if meta and getattr(meta, "publication_date", None)
+                    else None
+                ),
+                "tInvalid": (
+                    meta.repeal_date.isoformat()
+                    if meta and getattr(meta, "repeal_date", None)
+                    else None
+                ),
+                "isConflicted": False,
+                # Internal: not consumed by the UI but kept so callers can
+                # cross-reference back to the section without re-parsing.
+                "_sectionId": src.section_id,
+                "_isCited": src.chunk_id in cited,
+            }
+        )
+
+    # Edges between assembled sources — same rule the LLM prompt uses.
+    edges: list[dict[str, Any]] = []
+    seen_edge: set[tuple[str, str, str]] = set()
+    for src in context.sources:
+        neighbors = graph.get_neighbors(
+            src.section_id,
+            edge_types=list(ORBIT_EDGE_TYPES),
+            direction="both",
+        )
+        for nbr in neighbors:
+            target_chunk = section_to_chunk.get(nbr.node_id)
+            if target_chunk is None or target_chunk == src.chunk_id:
+                continue
+            outgoing = nbr.direction == "out"
+            a, b = (src.chunk_id, target_chunk) if outgoing else (target_chunk, src.chunk_id)
+            key = (a, b, nbr.edge.type)
+            if key in seen_edge:
+                continue
+            seen_edge.add(key)
+            edges.append({"source": a, "target": b, "relation": nbr.edge.type})
+
+    return nodes, edges, source_by_chunk
+
+
+def _sniff_subcorpus(chunk_id: str, source_field: str | None) -> str | None:
+    """Infer the source_subcorpus from a chunk_id when the graph node lacks it.
+
+    Our chunk_ids look like ``finlex/kho/...`` or ``vero/vero_ohje/...`` —
+    the second path segment is the subcorpus.
+    """
+    parts = chunk_id.split("/")
+    if len(parts) >= 2:
+        return parts[1]
+    return source_field
+
+
+# ---------------------------------------------------------------------------
+# Citation rewriting — [Source N] → [cite:node:<chunk_id>]Source N[/cite]
+# ---------------------------------------------------------------------------
+
+
+import re
+
+_LLM_CITE_RE = re.compile(r"\[\s*source\s+(\d+)\b[^\]]*\]", re.IGNORECASE)
+
+
+def rewrite_citations(answer: str, context: AssembledContext) -> str:
+    """Replace ``[Source N]`` tokens with the frontend's cite markup.
+
+    The AnswerStream renderer in ``components/AnswerStream.tsx`` looks for
+    ``[cite:node:<id>]<label>[/cite]`` and turns the label into a hoverable
+    underline. Anything we can't resolve we leave alone (the UI tolerates
+    bare ``[Source N]`` as literal text).
+    """
+    def _sub(m: re.Match[str]) -> str:
+        idx = int(m.group(1))
+        cid = context.chunk_id_for_label(f"[Source {idx}]")
+        if cid is None:
+            return m.group(0)
+        return f"[cite:node:{cid}]Source {idx}[/cite]"
+
+    return _LLM_CITE_RE.sub(_sub, answer)
+
+
+# ---------------------------------------------------------------------------
+# Cost estimate — placeholder until the LLM call returns usage tokens.
+# ---------------------------------------------------------------------------
+
+
+def estimate_cost_cents(answer: str, context: AssembledContext) -> float:
+    """Rough cost in cents. Used for the live cost meter only; not billing.
+
+    Token estimate: ~4 chars per token, +1k for the system prompt. Cost-per-
+    1k input tokens at $0.00007 (DeepSeek-V4-Flash pricing as of 2026-01).
+    """
+    in_chars = len(context.text) + 1000
+    out_chars = len(answer)
+    in_tokens = in_chars / 4
+    out_tokens = out_chars / 4
+    # $0.07 per 1M input, $0.28 per 1M output → cents ≈ usd * 100.
+    cents = (in_tokens * 0.00007 + out_tokens * 0.00028) / 10.0
+    return round(max(cents, 0.01), 3)

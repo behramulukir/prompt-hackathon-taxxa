@@ -22,11 +22,12 @@ import time
 from pathlib import Path
 from typing import Any
 
+from src.agents.verifier import check_temporal_mismatches
 from src.indexing.graph_store import GraphStore
-from src.models import AmendmentCaveat, AnswerResult, RetrievalPath
+from src.models import AmendmentCaveat, AnswerResult, RetrievalPath, VersionStep
 from src.retrieval.assemble import AssembledContext, assemble
 from src.retrieval.caveats import build_amendment_caveats
-from src.retrieval.filters import infer_filters
+from src.retrieval.filters import infer_as_of_date, infer_filters
 from src.retrieval.generate import Generation, generate
 from src.retrieval.query_rewrite import ExpandedQuery, expand_query
 from src.retrieval.rerank import RerankedHit, rerank
@@ -81,6 +82,14 @@ class Pipeline:
             filters = {**filters, **extra_filters}
         timings["filter_infer"] = _ms_since(t)
 
+        # 1c. As-of date inference (Step 10 / Move 5a) ---------------------
+        # The assembler uses this date when calling text_at(); the
+        # Verifier compares LLM output against the resulting effective
+        # text. ``as_of_explicit`` lets future code grade Verifier
+        # findings more strictly when the user asked about a specific
+        # date.
+        as_of, as_of_explicit = infer_as_of_date(question)
+
         # 1b. Query rewrite -------------------------------------------------
         # Plan A — one short LLM call to add Finnish equivalents and
         # likely document-type signals before retrieval. Soft-fails to
@@ -117,8 +126,12 @@ class Pipeline:
         timings["rerank"] = _ms_since(t)
 
         # 4. Assemble -------------------------------------------------------
+        # ``as_of`` flows into the assembler's text_at() calls so the
+        # LLM sees the effective text for the requested point in time.
         t = time.perf_counter()
-        context: AssembledContext = assemble(reranked, graph=self.graph, n=n)
+        context: AssembledContext = assemble(
+            reranked, graph=self.graph, n=n, as_of=as_of
+        )
         timings["assemble"] = _ms_since(t)
 
         # 5. Generate -------------------------------------------------------
@@ -135,6 +148,21 @@ class Pipeline:
             graph=self.graph,
         )
 
+        # 7. Temporal mismatch check (Step 10 / Move 5d) -------------------
+        # Deterministic, no LLM. Compares the LLM's answer against the
+        # version chain of each cited SECTION; emits TemporalMismatch
+        # records when the LLM appears to quote an older version. The
+        # result is folded into ``conflicts`` so the UI surfaces it
+        # alongside Finlex-vs-Vero conflicts.
+        cited_sections_with_chain = _cited_sections_with_chain(
+            gen.cited_chunk_ids, context
+        )
+        temporal_mismatches = check_temporal_mismatches(
+            answer=gen.answer,
+            cited_sections=cited_sections_with_chain,
+            as_of_used=as_of,
+        )
+
         timings["total"] = _ms_since(t_total)
 
         return _build_answer_result(
@@ -146,6 +174,9 @@ class Pipeline:
             timings=timings,
             amendment_caveats=amendment_caveats,
             expanded=expanded,
+            as_of_used=as_of,
+            as_of_explicit=as_of_explicit,
+            temporal_mismatches=temporal_mismatches,
         )
 
     def close(self) -> None:
@@ -200,6 +231,29 @@ def _ms_since(t0: float) -> int:
     return int((time.perf_counter() - t0) * 1000)
 
 
+def _cited_sections_with_chain(
+    cited_chunk_ids: list[str], context: AssembledContext
+) -> list[tuple[str, list[VersionStep]]]:
+    """``[(section_id, chain), ...]`` for every cited chunk that has a
+    non-trivial version_chain in the assembled context.
+
+    Deduped by section_id (the order matches first-cited-first). Used by
+    the Step 10 temporal-mismatch check.
+    """
+    out: list[tuple[str, list[VersionStep]]] = []
+    seen: set[str] = set()
+    chunk_to_source = {s.chunk_id: s for s in context.sources}
+    for cid in cited_chunk_ids:
+        s = chunk_to_source.get(cid)
+        if s is None or not s.version_chain:
+            continue
+        if s.section_id in seen:
+            continue
+        seen.add(s.section_id)
+        out.append((s.section_id, list(s.version_chain)))
+    return out
+
+
 def _build_answer_result(
     *,
     question: str,
@@ -210,6 +264,9 @@ def _build_answer_result(
     timings: dict[str, int],
     amendment_caveats: list[AmendmentCaveat] | None = None,
     expanded: ExpandedQuery | None = None,
+    as_of_used: "date_t | None" = None,  # noqa: F821 — local import below
+    as_of_explicit: bool = False,
+    temporal_mismatches: list | None = None,
 ) -> AnswerResult:
     """Compose the AnswerResult contract.
 
@@ -251,6 +308,33 @@ def _build_answer_result(
             f"Query expanded with Finnish keywords: {kw}."
         )
 
+    # Step 10 — effective_text_provenance: for each retrieved chunk
+    # whose section has a non-trivial chain, dump the applied steps as
+    # plain dicts (model_dump) so the UI can render them without
+    # importing the Pydantic models. ``effective_text`` lives inside
+    # the chain (the last step's text) but we also expose it on the
+    # source rendering — so this dict is purely the *provenance*.
+    effective_text_provenance: dict[str, list[dict[str, Any]]] = {}
+    for s in context.sources:
+        if s.version_chain:
+            effective_text_provenance[s.chunk_id] = [
+                step.model_dump(mode="json") for step in s.version_chain
+            ]
+
+    if as_of_explicit:
+        assumptions.append(
+            f"Answer reflects rules effective as of {as_of_used.isoformat() if as_of_used else 'today'}."
+        )
+
+    # Surface deterministic TemporalMismatch records on ``conflicts``.
+    # The schema lets us push any dict shape; the UI distinguishes by
+    # the ``kind`` discriminator we add here.
+    conflicts: list[dict[str, Any]] = []
+    for m in (temporal_mismatches or []):
+        d = m.model_dump(mode="json")
+        d["kind"] = "temporal_mismatch"
+        conflicts.append(d)
+
     return AnswerResult(
         question=question,
         answer=generation.answer,
@@ -259,6 +343,8 @@ def _build_answer_result(
         retrieval_paths=retrieval_paths,
         timing_ms=timings,
         assumptions=assumptions,
-        conflicts=[],  # v1 leaves conflict surfacing to the LLM prose; Verifier in Step 8 fills this.
+        conflicts=conflicts,
         amendment_caveats=amendment_caveats or [],
+        as_of_date_used=as_of_used,
+        effective_text_provenance=effective_text_provenance,
     )

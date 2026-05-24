@@ -105,6 +105,11 @@ EdgeType = Literal[
     "transposes",
     "applies",
     "defines",
+    # Step 10: ``AMENDMENT_BLOCK → SECTION`` typed edge emitted by
+    # ``scripts/resolve_amendment_targets.py``. Differs from the LAW-level
+    # ``amends`` edge (Step 9) by carrying section-level resolution and an
+    # operative verb (muutetaan / kumotaan / lisätään) in ``properties``.
+    "amends_section",
 ]
 
 ExtractionMethod = Literal["structural", "anchor", "regex", "llm"]
@@ -410,5 +415,151 @@ class AnswerResult(BaseModel):
     # ``temporal_status.effective_usable`` is suspect/stale/repealed.
     # Empty list = every citation is on currently clean ancestor history.
     amendment_caveats: list[AmendmentCaveat] = Field(default_factory=list)
+
+    # Step 10 — point-in-time text resolution.
+    # ``as_of_date_used`` is the date the assembler used when calling
+    # ``GraphStore.text_at()``; defaults to today when no temporal marker
+    # in the question. ``effective_text_provenance`` maps each cited
+    # chunk_id to the chronological version chain that produced its body.
+    # Empty/null when Step 10 isn't wired (back-compat for old pipelines).
+    as_of_date_used: date | None = None
+    effective_text_provenance: dict[str, list[dict[str, Any]]] = Field(
+        default_factory=dict
+    )
+
+    model_config = {"extra": "allow"}
+
+
+# --------------------------------------------------------------------------
+# Step 10 — Amendment effect integration
+#
+# These types support the point-in-time text resolution pipeline:
+#   AmendmentOp     — one operative directive parsed from an AMENDMENT_BLOCK
+#                     body ("muutetaan 53 §", "kumotaan 12 §", "lisätään 7 a §")
+#   VersionStep     — one entry in a section's chronological version chain
+#   EffectiveText   — the result of playing ops back up to ``as_of``
+# --------------------------------------------------------------------------
+
+
+AmendmentVerb = Literal["muutetaan", "kumotaan", "lisätään"]
+
+
+class AmendmentOp(BaseModel):
+    """One operative directive parsed from an AMENDMENT_BLOCK body.
+
+    Written to ``output/amendment_ops.jsonl`` by Move 1
+    (``scripts/extract_amendment_ops.py``) and consumed by Move 2
+    (``scripts/resolve_amendment_targets.py``) to produce ``amends_section``
+    edges. The directive is the smallest atomic action — one verb, one
+    target section. Multi-section blocks emit one ``AmendmentOp`` per
+    target.
+    """
+
+    # The AMENDMENT_BLOCK node that emitted this directive.
+    block_id: str
+
+    # The LAW root the block belongs to (derived from ``block_id``).
+    block_law_id: str
+
+    verb: AmendmentVerb
+
+    # The section identifier as it appears in the directive, lightly
+    # normalized: leading whitespace stripped, ``§`` retained. Examples:
+    # "53 §", "12 a §", "7 a §". Sub-section markers ("53 § 2 mom")
+    # land in ``target_subsection`` (Move 1 parses them out).
+    target_section_label: str
+
+    # When the directive targets a specific momentti (subsection), this
+    # carries its 1-indexed position. None for whole-§ rewrites.
+    target_subsection: int | None = None
+
+    # The new wording for ``muutetaan`` / ``lisätään``. Always None for
+    # ``kumotaan``. May be a multi-paragraph body; the assembler trims
+    # at render time.
+    new_text: str | None = None
+
+    # Effective date parsed from the AMENDMENT_BLOCK's "Tämä laki tulee
+    # voimaan ..." clause. Mirrors the value Move 1 already writes into
+    # ``edges.properties_json`` for the LAW-level ``amends`` edge.
+    effective_date: date | None = None
+
+    # Confidence in the parse. 1.0 for a clean single-section heading,
+    # lower for fuzzy matches (e.g. directive parsed from a paragraph
+    # mid-block). Resolution (Move 2) may downgrade further if the target
+    # section can't be located in the corpus.
+    confidence: float = Field(default=1.0, ge=0.0, le=1.0)
+
+    # Flagged when the directive is part of a chained operation we don't
+    # model precisely (e.g. ``muutetaan 53 § ja lisätään uusi 12 a §
+    # seuraavasti:``). The verb/target are still captured but the LLM
+    # should treat ``new_text`` as approximate.
+    chain_complex: bool = False
+
+    model_config = {"extra": "allow"}
+
+
+class VersionStep(BaseModel):
+    """One entry in a SECTION's chronological version chain.
+
+    Stored as a list under ``Node.metadata.version_chain`` after Move 3
+    (``scripts/compute_version_chains.py``). The first entry is always
+    the original SECTION text (``provenance="original"``).
+    """
+
+    effective_date: date | None = None
+    source_id: str  # the SECTION (for original) or AMENDMENT_BLOCK
+    provenance: Literal["original", "muutetaan", "kumotaan", "lisätään"]
+
+    # ``muutetaan`` / ``lisätään`` carry the new wording. ``kumotaan`` and
+    # ``original`` may carry it too: ``original`` always does, ``kumotaan``
+    # is the explicit None marker.
+    text: str | None = None
+
+    # Block that emitted this step (for ``original`` it's the SECTION
+    # itself). Lets the UI link from a chain entry back to its source.
+    amendment_block_id: str | None = None
+
+    model_config = {"extra": "allow"}
+
+
+class EffectiveText(BaseModel):
+    """Result of playing a SECTION's version chain forward to a target date.
+
+    Returned by ``GraphStore.text_at(section_id, as_of)``. The chain is
+    the sequence of ops actually applied (i.e. effective_date <= as_of).
+    Future ops in the version chain — those with effective_date > as_of —
+    are not in ``chain`` but ``has_future_amendments`` is True so the UI
+    can surface them.
+    """
+
+    text: str | None  # None when the most recent applied op was ``kumotaan``
+    chain: list[VersionStep]
+    is_current: bool  # as_of == today's date at construction time
+    has_future_amendments: bool
+
+    model_config = {"extra": "allow"}
+
+
+# --------------------------------------------------------------------------
+# TemporalMismatch — surfaced by the Verifier agent (Move 5d)
+# --------------------------------------------------------------------------
+
+
+class TemporalMismatch(BaseModel):
+    """The LLM appears to be quoting a non-current version of a cited §.
+
+    Produced by the Verifier when, for some cited section, the LLM's
+    text matches an older ``VersionStep`` more closely than the
+    effective version for ``as_of_date_used``. Surfaced on
+    ``AnswerResult.conflicts`` as a structured dict so the UI can render
+    it next to authority conflicts.
+    """
+
+    cited_section_id: str
+    as_of_used: date
+    correct_version_effective_date: date | None
+    llm_appears_to_quote_version_date: date | None
+    similarity_to_correct: float  # 0..1
+    similarity_to_quoted: float   # 0..1
 
     model_config = {"extra": "allow"}

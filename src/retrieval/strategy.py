@@ -22,6 +22,28 @@ from src.retrieval.graph_expand import ExpansionStrategy, vector_only_strategy
 # ---------------------------------------------------------------------------
 
 
+# Step-11 Plan B: deeper candidate pools.
+# Pre-Plan-B every strategy used ``seed_k=10`` — fast, but too tight to
+# survive cross-lingual queries. The user's eval question
+# ("maximum daily withholding tax percentage / ennakonpidätys") put the
+# correct 2026 Verohallinto päätös chunk at *hybrid rank ~16* after
+# Plan A's query expansion, which never reached the cross-encoder
+# because seed_k=10 cut it off. Raising seed_k brings the cross-encoder
+# the candidates it needs to discriminate properly.
+#
+# CROSS_SOURCE (the päätös / Vero-ohje route) gets the biggest bump
+# because that's the strategy that most often spans the multilingual
+# divide — administrative Finnish answering an English question.
+# DEFAULT (the cross_source/case_law/etc. catch-all) gets a smaller
+# bump so generic Finnish questions retain their speed budget.
+# Other strategies are deliberately untouched — they have stronger
+# graph priors (CASE_LAW expands inbound from KHO, RECENCY follows
+# amendment edges, etc.) so 10 seeds already feed reasonable BFS.
+#
+# Cross-encoder cost scales linearly: 10 → 30 candidates is ~3x the
+# scoring time (~150ms → ~450ms on local hardware). Dwarfed by the
+# generation step (~10s) and Plan A's query_rewrite (~3-6s on cold).
+
 MULTI_HOP = ExpansionStrategy(
     name="multi_hop",
     seed_k=10,
@@ -34,12 +56,23 @@ MULTI_HOP = ExpansionStrategy(
 
 CROSS_SOURCE = ExpansionStrategy(
     name="cross_source",
-    seed_k=10,
+    # 10 → 30: Plan B. Lets the cross-encoder see hybrid hits that
+    # Plan A's query expansion now surfaces around rank 15-25, which
+    # are typically the actual answer documents for cross-lingual
+    # päätös / ohje questions.
+    seed_k=30,
     edge_types=("interprets", "parent_of"),
     direction="both",
     max_hops=2,
     max_nodes=40,
     degree_caps={"interprets_in": 30},
+    # Bump metadata weight 0.10 → 0.20 (taking from cross-encoder
+    # 0.60 → 0.50). The cross-encoder under-rates current Verohallinto
+    # päätökset against older statute amendments when both look
+    # semantically similar; the metadata signal — now carrying an
+    # absolute-freshness term keyed on publication_date — needs more
+    # sway to break those ties in favour of currency.
+    rerank_weights=(0.5, 0.3, 0.2),
 )
 
 CASE_LAW = ExpansionStrategy(
@@ -77,7 +110,10 @@ RECENCY = ExpansionStrategy(
     rerank_weights=(0.5, 0.2, 0.3),
 )
 
-DEFAULT = vector_only_strategy(seed_k=10)
+# 10 → 20: Plan B applied at half strength for the catch-all. Generic
+# Finnish questions usually hit the right chunk in the top 10 already,
+# but English questions about Finnish concepts often sit at rank 11-20.
+DEFAULT = vector_only_strategy(seed_k=20)
 
 
 # ---------------------------------------------------------------------------

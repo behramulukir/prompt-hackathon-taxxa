@@ -24,10 +24,11 @@ the full 1.97M-node index — see the constraint notes in the plan.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import date
 
 from src.indexing.graph_store import GraphStore
-from src.models import Neighbor
+from src.models import EffectiveText, Neighbor, VersionStep
 from src.retrieval.rerank import RerankedHit
 
 
@@ -47,6 +48,12 @@ RENDERED_EDGE_TYPES: tuple[str, ...] = ("cites", "interprets", "amends", "define
 class Source:
     """One numbered block in the assembled context. ``label`` is the
     ``[Source N]`` string the LLM cites back with.
+
+    Step 10 extension: each source carries the ``version_chain`` that
+    produced its rendered body (empty when the section has no chain) and
+    a ``has_future_amendments`` flag for the UI. ``effective_text`` is
+    the actual body string the LLM saw — may differ from the section's
+    raw ``text`` when amendments have been applied.
     """
 
     label: str  # "[Source 1]"
@@ -57,13 +64,26 @@ class Source:
     cosine_sim: float
     rendered_block: str
 
+    # Step 10 — point-in-time provenance for the rendered body.
+    effective_text: str | None = None
+    version_chain: tuple[VersionStep, ...] = field(default_factory=tuple)
+    has_future_amendments: bool = False
+
 
 @dataclass(frozen=True)
 class AssembledContext:
-    """The text handed to the LLM, plus the mapping back to chunk_ids."""
+    """The text handed to the LLM, plus the mapping back to chunk_ids.
+
+    ``as_of_used`` (Step 10) is the date the assembler passed to
+    ``GraphStore.text_at`` when fetching effective bodies — pipeline
+    callers forward it onto ``AnswerResult.as_of_date_used`` so the UI
+    and the Verifier can see which point-in-time the prompt was built
+    against.
+    """
 
     text: str
     sources: list[Source]
+    as_of_used: date | None = None
 
     def chunk_id_for_label(self, label: str) -> str | None:
         """Resolve ``[Source N]`` back to the underlying chunk_id.
@@ -242,6 +262,59 @@ def _temporal_lines(temporal_status: dict | None) -> list[str]:
 
 
 # --------------------------------------------------------------------------
+# Version-chain rendering — Step 10 / Move 5b
+# --------------------------------------------------------------------------
+
+
+def _version_chain_lines(
+    effective: EffectiveText | None, as_of: date | None
+) -> list[str]:
+    """Render the section's version chain as inline annotation lines.
+
+    Silent when the chain has only the ``original`` step — that's the
+    overwhelming majority of sections and we don't want to clutter the
+    prompt. For sections with applied amendments, we list each step on
+    its own line and mark the one that produced the current text. Future
+    (post-``as_of``) amendments get a separate line that's deliberately
+    short so the LLM doesn't quote from them.
+    """
+    if effective is None or not effective.chain:
+        return []
+    # Only original step + nothing applied? Skip.
+    interesting = [s for s in effective.chain if s.provenance != "original"]
+    if not interesting and not effective.has_future_amendments:
+        return []
+
+    lines: list[str] = []
+    header = "  Version chain"
+    if as_of is not None:
+        header += f" (as of {as_of.isoformat()})"
+    lines.append(header + ":")
+    last_applied = effective.chain[-1] if effective.chain else None
+    for step in effective.chain:
+        marker = "·"
+        date_str = step.effective_date.isoformat() if step.effective_date else "undated"
+        verb = step.provenance
+        tag = " — current text used" if step is last_applied and verb != "original" else ""
+        lines.append(f"    {marker} {date_str} {verb}{tag}")
+    if effective.has_future_amendments:
+        lines.append(
+            f"    · future amendments exist (effective after {as_of.isoformat() if as_of else 'today'} — not applied)"
+        )
+    return lines
+
+
+def _kumotaan_placeholder(as_of: date | None) -> str:
+    """Body to render when the most recent applied step was ``kumotaan``.
+
+    The LLM should not confabulate text for a repealed section, so we
+    write a short, explicit placeholder it can cite.
+    """
+    when = f"as of {as_of.isoformat()}" if as_of else "as of the requested date"
+    return f"[Section repealed {when} — no operative text.]"
+
+
+# --------------------------------------------------------------------------
 # Edge rendering — Layer 5
 # --------------------------------------------------------------------------
 
@@ -335,6 +408,7 @@ def assemble(
     *,
     graph: GraphStore,
     n: int = 8,
+    as_of: date | None = None,
 ) -> AssembledContext:
     """Take the top-N reranked hits and render the LLM context.
 
@@ -342,15 +416,20 @@ def assemble(
     not chunks), renders the prescribed header/path/edges/body format, and
     returns the assembled string + the Source→chunk_id mapping.
 
-    Each rendered block now also carries ancestor-aware temporal context
-    (Move 4): a one-line summary of amendments to the parent LAW and
-    inbound KHO/Vero interpretations, both pulled from
-    ``metadata.temporal_status`` (Move 2 output). The lines are omitted
-    when there's nothing to say so the LLM prompt stays compact.
+    Each rendered block carries:
+      * ancestor-aware temporal_status lines (Step 9 / Move 4)
+      * the version chain that produced its body (Step 10 / Move 5b)
+
+    ``as_of`` (Step 10): when supplied, the assembler calls
+    ``GraphStore.text_at(section_id, as_of=as_of)`` for every cited
+    SECTION and uses the resulting effective text as the body — so
+    a question about 2019-era rules gets 2019-era wording, not the
+    consolidated current text. Defaults to None, which means
+    ``text_at`` uses today.
     """
     deduped = dedup_by_section(reranked)[:n]
     if not deduped:
-        return AssembledContext(text="", sources=[])
+        return AssembledContext(text="", sources=[], as_of_used=as_of)
 
     section_id_to_index = {r.hit.section_id: i + 1 for i, r in enumerate(deduped)}
 
@@ -369,6 +448,27 @@ def assemble(
         path = _extract_path(prefix)
         title = _extract_title(prefix)
         temporal_status = temporal_status_map.get(hit.section_id)
+
+        # Effective text via the version chain. Cheap when the chain
+        # is empty (no extra DB hits beyond the one Read). For sections
+        # *with* a chain, this is what makes the answer reflect the
+        # right point in time.
+        effective: EffectiveText = graph.text_at(hit.section_id, as_of=as_of)
+        # Use the effective body when (a) there is a chain that changes
+        # things, or (b) the chunk's embedded body is empty. Otherwise
+        # the chunk's embedded body is the safer choice — it includes
+        # all the subsection/item children that pack_section bundled,
+        # which text_at on a SECTION alone may not.
+        chain_changed = len(effective.chain) > 1 or any(
+            s.provenance != "original" for s in effective.chain
+        )
+        if effective.text is None and chain_changed:
+            # kumotaan as of as_of — write the placeholder explicitly.
+            body_for_render = _kumotaan_placeholder(as_of)
+        elif chain_changed and effective.text:
+            body_for_render = effective.text
+        else:
+            body_for_render = body
 
         header = _header_line(
             index=idx,
@@ -390,8 +490,9 @@ def assemble(
         )
         lines.extend(edge_lines)
         lines.extend(_temporal_lines(temporal_status))
+        lines.extend(_version_chain_lines(effective, as_of))
 
-        body_text = _trim_body(body) if body else ""
+        body_text = _trim_body(body_for_render) if body_for_render else ""
         lines.append("")  # blank line between header block and body
         lines.append(body_text)
 
@@ -406,8 +507,11 @@ def assemble(
                 rerank_score=r.score,
                 cosine_sim=hit.cosine_sim,
                 rendered_block=block,
+                effective_text=effective.text if chain_changed else (body or None),
+                version_chain=tuple(effective.chain) if chain_changed else (),
+                has_future_amendments=effective.has_future_amendments,
             )
         )
 
     text = "\n\n".join(blocks)
-    return AssembledContext(text=text, sources=sources)
+    return AssembledContext(text=text, sources=sources, as_of_used=as_of)

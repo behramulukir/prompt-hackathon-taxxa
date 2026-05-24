@@ -1,0 +1,67 @@
+# Dependencies
+node_modules/
+.pnp/
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/versions
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+.uv-cache/
+*.egg-info/
+dist/
+build/
+
+# Next.js
+.next/
+out/
+
+# Production
+*.local
+.env
+.env*.local
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+*.log
+
+# Editor / OS
+.DS_Store
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Data — ingest output is reproducible from scripts/ingest.py
+data/raw/
+data/cache/
+data/embeddings/
+data/sparql_cache.json
+!data/seed/
+
+# Eval outputs — committed for traceability
+!data/results.json
+!data/sparql_validation.json
+
+# Neo4j docker volumes
+neo4j_data/
+neo4j_logs/
+
+# Modal local state
+.modal/
+
+# Ollama
+.ollama/
+
+# DSPy optimization artifacts
+agents/*.json.lock
+*.dspy-cache/

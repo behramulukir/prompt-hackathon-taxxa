@@ -37,9 +37,10 @@ from typing import Any
 
 from typing import Literal
 
+from src.agents.verifier import check_temporal_mismatches
 from src.indexing.graph_store import GraphStore
 from src.indexing.vector_store import VectorStore
-from src.models import AmendmentCaveat, AnswerResult, RetrievalPath
+from src.models import AmendmentCaveat, AnswerResult, RetrievalPath, VersionStep
 from src.retrieval.assemble import AssembledContext, assemble
 from src.retrieval.caveats import build_amendment_caveats
 from src.retrieval.cross_encoder_rerank import (
@@ -47,7 +48,7 @@ from src.retrieval.cross_encoder_rerank import (
     combine_scores,
     get_reranker,
 )
-from src.retrieval.filters import infer_filters
+from src.retrieval.filters import infer_as_of_date, infer_filters
 from src.retrieval.generate import Generation, generate
 from src.retrieval.graph_expand import ExpansionStrategy, expand
 from src.retrieval.query_rewrite import ExpandedQuery, expand_query
@@ -133,6 +134,9 @@ class PipelineV2:
         if extra_filters:
             filters = {**filters, **extra_filters}
         timings["filter_infer"] = _ms_since(t)
+
+        # 2c. As-of date inference (Step 10 / Move 5a) --------------------
+        as_of, as_of_explicit = infer_as_of_date(question)
 
         # 2b. Query rewrite --------------------------------------------------
         # Plan A — see ``src/retrieval/query_rewrite.py``. Adds Finnish
@@ -236,7 +240,9 @@ class PipelineV2:
 
         # 8. Assemble + generate (unchanged from v1) -------------------------
         t = time.perf_counter()
-        context: AssembledContext = assemble(reranked, graph=self.graph, n=n)
+        context: AssembledContext = assemble(
+            reranked, graph=self.graph, n=n, as_of=as_of
+        )
         timings["assemble"] = _ms_since(t)
 
         t = time.perf_counter()
@@ -248,6 +254,22 @@ class PipelineV2:
             cited_chunk_ids=gen.cited_chunk_ids,
             context=context,
             graph=self.graph,
+        )
+
+        # Step 10 / Move 5d — temporal-mismatch check.
+        cited_sections_with_chain: list[tuple[str, list[VersionStep]]] = []
+        seen_sections: set[str] = set()
+        chunk_to_source = {s.chunk_id: s for s in context.sources}
+        for cid in gen.cited_chunk_ids:
+            s = chunk_to_source.get(cid)
+            if s is None or not s.version_chain or s.section_id in seen_sections:
+                continue
+            seen_sections.add(s.section_id)
+            cited_sections_with_chain.append((s.section_id, list(s.version_chain)))
+        temporal_mismatches = check_temporal_mismatches(
+            answer=gen.answer,
+            cited_sections=cited_sections_with_chain,
+            as_of_used=as_of,
         )
 
         timings["total"] = _ms_since(t_total)
@@ -264,6 +286,9 @@ class PipelineV2:
             timings=timings,
             amendment_caveats=amendment_caveats,
             expanded=expanded,
+            as_of_used=as_of,
+            as_of_explicit=as_of_explicit,
+            temporal_mismatches=temporal_mismatches,
         )
 
     def close(self) -> None:
@@ -500,10 +525,11 @@ def _metadata_signal(
 ) -> float:
     """Light-weight metadata score in [0, 1] for the weighted combine.
 
-    Picks up authority + temporal_status + in_force so the cross-encoder's
-    choice isn't blind to source rank or to ancestor-level amendment
-    activity. Not as elaborate as v1's metadata reranker because the
-    cross-encoder is doing most of the discrimination work.
+    Picks up authority + temporal_status + in_force + absolute freshness
+    so the cross-encoder's choice isn't blind to source rank, ancestor-
+    level amendment activity, or publication recency. Not as elaborate
+    as v1's metadata reranker because the cross-encoder is doing most
+    of the discrimination work.
 
     ``temporal_status`` (Move 2 output) supersedes the legacy
     ``hit.usable`` flag when supplied. Falls back to ``hit.usable`` for
@@ -511,14 +537,14 @@ def _metadata_signal(
     """
     score = 0.0
     if hit.authority_rank is not None:
-        score += hit.authority_rank / 100.0 * 0.6
+        score += hit.authority_rank / 100.0 * 0.5
 
     # Prefer the ancestor-aware grade when available.
     grade = None
     if isinstance(temporal_status, dict):
         grade = temporal_status.get("effective_usable")
     if grade == "ok":
-        score += 0.2
+        score += 0.15
     elif grade == "suspect":
         # Small dampen — consolidated text usually reflects the amendment.
         score += 0.05
@@ -529,13 +555,48 @@ def _metadata_signal(
     elif grade is None:
         # No graph status — fall back to the binary flag, same as before.
         if hit.usable is True:
-            score += 0.2
+            score += 0.15
         elif hit.usable is False:
             score -= 0.4
 
     if hit.in_force is True:
-        score += 0.2
+        score += 0.15
+
+    # Absolute freshness — newer publication_date wins ties. ~0.15 max
+    # bump for today, linearly decaying to 0 across 10 years. Calibrated
+    # so a 2026 Verohallinto päätös meaningfully beats a 1990 amendment
+    # law even when they're cosine-equal for an English question. The
+    # cross-encoder's signal still dominates (weight 0.6 of final
+    # combined score per strategy.rerank_weights); this just breaks
+    # ties in favour of currency.
+    score += _publication_freshness(hit.publication_date)
+
     return max(0.0, min(1.0, score))
+
+
+def _publication_freshness(publication_date_iso: str | None) -> float:
+    """Map ISO publication date to a [0, 0.15] freshness bump.
+
+    Local to v2 to avoid coupling with ``rerank._absolute_freshness``
+    (which returns a [0, 1] signal weighted externally by W_FRESHNESS).
+    Same shape, different scaling — kept separate so each rerank path
+    can tune its freshness bump independently without cross-talk.
+    """
+    if not publication_date_iso:
+        return 0.0
+    try:
+        import datetime as _dt
+        # Accept full timestamps in case Step 3 ever widens the field.
+        pub = _dt.datetime.fromisoformat(publication_date_iso[:10]).date()
+    except (ValueError, TypeError):
+        return 0.0
+    today = _dt.date.today()
+    delta = (today - pub).days
+    if delta <= 0:
+        return 0.15  # today or future-dated
+    if delta >= 3650:  # 10y+
+        return 0.0
+    return 0.15 * (1.0 - delta / 3650.0)
 
 
 def _build_answer_result_v2(
@@ -551,6 +612,9 @@ def _build_answer_result_v2(
     timings: dict[str, int],
     amendment_caveats: list[AmendmentCaveat] | None = None,
     expanded: ExpandedQuery | None = None,
+    as_of_used: "date_t | None" = None,  # noqa: F821
+    as_of_explicit: bool = False,
+    temporal_mismatches: list | None = None,
 ) -> AnswerResult:
     """Compose the AnswerResult for v2. ``retrieval_paths`` keys are chunk_ids
     for vector-anchored sources and node_ids for graph-expanded ones (allowed
@@ -588,6 +652,26 @@ def _build_answer_result_v2(
             f"Query expanded with Finnish keywords: {kw}."
         )
 
+    # Step 10 provenance dict — same shape as v1's pipeline produces.
+    effective_text_provenance: dict[str, list[dict[str, Any]]] = {}
+    for s in context.sources:
+        if s.version_chain:
+            effective_text_provenance[s.chunk_id] = [
+                step.model_dump(mode="json") for step in s.version_chain
+            ]
+
+    if as_of_explicit:
+        assumptions.append(
+            f"Answer reflects rules effective as of "
+            f"{as_of_used.isoformat() if as_of_used else 'today'}."
+        )
+
+    conflicts: list[dict[str, Any]] = []
+    for m in (temporal_mismatches or []):
+        d = m.model_dump(mode="json")
+        d["kind"] = "temporal_mismatch"
+        conflicts.append(d)
+
     return AnswerResult(
         question=question,
         answer=generation.answer,
@@ -596,6 +680,8 @@ def _build_answer_result_v2(
         retrieval_paths=retrieval_paths,
         timing_ms=timings,
         assumptions=assumptions,
-        conflicts=[],
+        conflicts=conflicts,
         amendment_caveats=amendment_caveats or [],
+        as_of_date_used=as_of_used,
+        effective_text_provenance=effective_text_provenance,
     )

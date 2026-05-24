@@ -21,9 +21,20 @@ from src.retrieval.vector_retriever import RetrievedHit
 # Weights — see brief §B5.3. Treat as starting point, tune on eval set.
 # --------------------------------------------------------------------------
 W_AUTHORITY = 0.10  # multiplied by (authority_rank / 100)
-W_RECENCY = 0.05  # multiplied by recency_signal in [0, 1]
+W_RECENCY = 0.05  # multiplied by ``_recency_signal`` (newest-in-set relative)
+W_FRESHNESS = 0.10  # multiplied by ``_absolute_freshness`` (today-relative)
 W_TERM_BONUS = 0.05  # added if query term appears in section title/path
 W_NOT_USABLE = 0.50  # subtracted when usable=false — legacy fallback
+
+# ``W_RECENCY`` and ``W_FRESHNESS`` look similar but do different jobs.
+# Recency normalises against the *newest in the result set* — it
+# differentiates within a query's hits but doesn't tell us whether the
+# set itself is recent. Freshness normalises against *today*, so a hit
+# from 1980 always scores 0 freshness regardless of what else is in the
+# set. This is the "prefer up-to-date sources" lever — load-bearing for
+# questions about annual rates / thresholds where a current Verohallinto
+# päätös should beat an old amendment law even when both surface
+# equally relevant cosine-wise.
 
 # Graded temporal penalty driven by ``temporal_status.effective_usable``
 # from ``scripts.compute_temporal_status``. Replaces the binary
@@ -124,6 +135,26 @@ def _recency_signal(hit_date: date | None, newest: date | None) -> float:
     return max(0.0, 1.0 - (delta_days / RECENCY_HALFLIFE_DAYS))
 
 
+def _absolute_freshness(hit_date: date | None, today: date | None = None) -> float:
+    """Map publication_date to [0, 1] against ``today`` (not the set).
+
+    A 2026-published Verohallinto päätös scores ~1.0 even if the result
+    set is dominated by 1980s amendment laws. A 1990 chunk scores ~0
+    even when it's the newest in its set. This is the "absolutely
+    recent" signal — pairs with ``_recency_signal``'s relative one.
+
+    Linear decay across 10 years; future-dated chunks (consolidated
+    text with a scheduled future amendment date) clamp to 1.0.
+    """
+    if hit_date is None:
+        return 0.0
+    today = today or date.today()
+    delta_days = (today - hit_date).days
+    if delta_days <= 0:
+        return 1.0
+    return max(0.0, 1.0 - (delta_days / RECENCY_HALFLIFE_DAYS))
+
+
 def _exact_term_bonus(query_terms: list[str], embedded_text: str | None) -> float:
     """Return 1.0 when any content-bearing query term appears in the title
     or path lines of the embedded_text, 0.0 otherwise.
@@ -181,6 +212,7 @@ def rerank(
         # as 0 — neutral rather than penalizing, matching the spec.
         auth = (hit.authority_rank or 0) / 100.0
         rec = _recency_signal(hit_date, newest)
+        fresh = _absolute_freshness(hit_date)
         term = _exact_term_bonus(query_terms, hit.embedded_text)
         temporal_pen, temporal_grade = _temporal_penalty(hit, temporal_status_map)
 
@@ -188,6 +220,7 @@ def rerank(
             "cosine": hit.cosine_sim,
             "authority": W_AUTHORITY * auth,
             "recency": W_RECENCY * rec,
+            "freshness": W_FRESHNESS * fresh,
             "term_bonus": W_TERM_BONUS * term,
             # Keep the legacy name in --verbose output so existing dashboards
             # don't break, but the value is now graded.

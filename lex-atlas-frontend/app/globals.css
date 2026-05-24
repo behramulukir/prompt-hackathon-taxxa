@@ -1,0 +1,357 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+/* Tailwind v4 source discovery */
+@source "../app/**/*.tsx";
+@source "../components/**/*.tsx";
+@source "../lib/**/*.tsx";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* ---------------------------------------------------------------
+   Lex Atlas - design tokens (Stitch-derived, light + editorial).
+   Paper off-white background, terracotta accent, hard borders.
+   Headlines: EB Garamond. Body: Inter. Labels: JetBrains Mono.
+   --------------------------------------------------------------- */
+@theme {
+  /* Surfaces */
+  --color-background:               #f9f9f7;
+  --color-surface:                  #f9f9f7;
+  --color-surface-bright:           #f9f9f7;
+  --color-surface-dim:              #dadad8;
+  --color-surface-container-lowest: #ffffff;
+  --color-surface-container-low:    #f4f4f2;
+  --color-surface-container:        #eeeeec;
+  --color-surface-container-high:   #e8e8e6;
+  --color-surface-container-highest:#e2e3e1;
+  --color-surface-variant:          #e2e3e1;
+
+  /* Text */
+  --color-on-background:            #1a1c1b;
+  --color-on-surface:               #1a1c1b;
+  --color-on-surface-variant:       #444748;
+
+  /* Strokes */
+  --color-outline:                  #747878;
+  --color-outline-variant:          #c4c7c7;
+
+  /* Primary (black-on-paper inversion) */
+  --color-primary:                  #000000;
+  --color-on-primary:               #ffffff;
+  --color-primary-container:        #1c1b1b;
+  --color-on-primary-container:     #858383;
+
+  /* Accent - terracotta */
+  --color-secondary:                #944921;
+  --color-on-secondary:             #ffffff;
+  --color-secondary-container:      #fe9e6e;
+  --color-on-secondary-container:   #77330b;
+  --color-secondary-fixed:          #ffdbcc;
+  --color-secondary-fixed-dim:      #ffb693;
+  --color-on-secondary-fixed:       #351000;
+  --color-on-secondary-fixed-variant:#76330b;
+
+  /* Inverse */
+  --color-inverse-surface:          #2f3130;
+  --color-inverse-on-surface:       #f1f1ef;
+  --color-inverse-primary:          #c8c6c5;
+
+  /* Error */
+  --color-error:                    #ba1a1a;
+  --color-error-container:          #ffdad6;
+  --color-on-error:                 #ffffff;
+  --color-on-error-container:       #93000a;
+
+  /* Node-kind colors (used by graph nodes + cite anchors) */
+  --color-node-work:                #1a1c1b;
+  --color-node-action:              #944921;
+  --color-node-case:                #9c2b5f;
+  --color-node-guidance:            #006b70;
+  --color-node-concept:             #76330b;
+
+  /* ── Canonical type ramp. Every text-[var(--text-*)] reference points here. ── */
+  --text-overline:   11px;   /* mono labels: AS OF, CHAPTER, section headers */
+  --text-meta:       12px;   /* pill labels, tag badges, footer text */
+  --text-body-sm:    13px;   /* table cells, prompt body, dense lists */
+  --text-body:       15px;   /* prompt label, debate body, default app body */
+  --text-body-lg:    16.5px; /* methodology body, audit body, prose */
+  --text-h4:         20px;   /* sidebar headers, synthesis title */
+  --text-h3:         28px;   /* chapter title, section heading */
+  --text-h2:         40px;   /* large page section heading */
+  --text-h1:         56px;   /* page hero heading */
+  --text-display:    72px;   /* landing display heading */
+
+  /* Backwards-compat aliases (existing components still reference these). */
+  --text-display-lg:        72px;
+  --text-headline-lg:       40px;
+  --text-headline-lg-mobile:32px;
+  --text-headline-md:       24px;
+  --text-label-mono-md:     14px;
+  --text-label-mono-sm:     12px;
+  --leading-display-lg:     80px;
+  --leading-headline-lg:    48px;
+  --leading-headline-lg-mobile: 40px;
+  --leading-headline-md:    32px;
+  --leading-body-lg:        28px;
+  --leading-body-md:        24px;
+  --leading-label-mono-md:  20px;
+  --leading-label-mono-sm:  16px;
+
+  /* ── Canonical spacing scale. Use as gap-[var(--space-N)], px-[var(--space-N)]. ── */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+  --space-7: 48px;
+  --space-8: 64px;
+  --space-9: 96px;
+
+  /* ── Icon sizes. Only these four are allowed across the app. ── */
+  --icon-xs: 14px;
+  --icon-sm: 16px;
+  --icon-md: 20px;
+  --icon-lg: 24px;
+
+  /* Radius - very subtle */
+  --radius-sm: 2px;
+  --radius-md: 4px;
+  --radius-lg: 8px;
+  --radius-xl: 12px;
+
+  /* Backwards-compat (the old `gap-gutter` etc. names) */
+  --spacing-gutter: 24px;
+  --spacing-margin-safe: 40px;
+  --spacing-grid-pattern: 32px;
+
+  /* Motion */
+  --ease-cubic: cubic-bezier(0.4, 0, 0.2, 1);
+  --dur-fast: 150ms;
+  --dur-medium: 300ms;
+  --dur-pull: 700ms;
+}
+
+@theme inline {
+  --font-sans: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+  --font-serif: var(--font-eb-garamond), Georgia, Times New Roman, serif;
+  --font-mono: var(--font-jetbrains-mono), ui-monospace, SFMono-Regular, Menlo, Monaco, Liberation Mono, monospace;
+}
+
+/* --------------------------------------------------------------- */
+@layer base {
+  html {
+    background: var(--color-background);
+    color: var(--color-on-surface);
+  }
+  body {
+    font-family: var(--font-sans);
+    font-feature-settings: 'cv11', 'ss01', 'ss03';
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    position: relative;
+  }
+  ::selection {
+    background: var(--color-secondary);
+    color: var(--color-on-secondary);
+  }
+  *:focus { outline: none; }
+  *:focus-visible {
+    outline: 1px solid var(--color-secondary);
+    outline-offset: 2px;
+  }
+  h1, h2, h3, .font-serif {
+    font-family: var(--font-serif);
+    font-weight: 500;
+  }
+}
+
+/* --------------------------------------------------------------- */
+@layer components {
+  /* Architectural 32x32 grid background on every page */
+  .architectural-grid {
+    position: fixed;
+    inset: 0;
+    z-index: -1;
+    pointer-events: none;
+    background-image:
+      linear-gradient(to right, rgba(196, 199, 199, 0.35) 1px, transparent 1px),
+      linear-gradient(to bottom, rgba(196, 199, 199, 0.35) 1px, transparent 1px);
+    background-size: 32px 32px;
+  }
+
+  /* 4px terracotta vertical bar - the insight marker */
+  .insight-marker {
+    position: relative;
+  }
+  .insight-marker::before {
+    content: '';
+    position: absolute;
+    left: -1rem;
+    top: 0;
+    bottom: 0;
+    width: 4px;
+    background-color: var(--color-secondary);
+  }
+  .insight-marker-tight::before { left: 0; }
+
+  .section-number {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--color-on-surface-variant);
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+  }
+
+  .cite-anchor {
+    text-decoration-line: underline;
+    text-decoration-thickness: 1.5px;
+    text-underline-offset: 4px;
+    cursor: help;
+    transition: text-decoration-thickness var(--dur-fast) var(--ease-cubic);
+  }
+  .cite-anchor:hover {
+    text-decoration-thickness: 2.5px;
+  }
+
+  .cite-pill {
+    padding: 0 4px;
+    border: 1px solid currentColor;
+    border-radius: 2px;
+    font-family: var(--font-mono);
+    font-size: 12px;
+  }
+
+  /* Hard-edge buttons */
+  .btn-primary {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+    padding: 1rem 2rem;
+    background: var(--color-primary);
+    color: var(--color-on-primary);
+    border: 1px solid var(--color-primary);
+    font-family: var(--font-mono);
+    font-size: 14px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    transition: background var(--dur-medium), border-color var(--dur-medium);
+  }
+  .btn-primary:hover {
+    background: var(--color-secondary);
+    border-color: var(--color-secondary);
+  }
+  .btn-primary:disabled {
+    background: var(--color-surface-container-high);
+    color: var(--color-on-surface-variant);
+    border-color: var(--color-outline-variant);
+    cursor: not-allowed;
+    /* Calm, not crippled - no opacity dim. */
+  }
+  .btn-primary:disabled:hover {
+    background: var(--color-surface-container-high);
+    border-color: var(--color-outline-variant);
+  }
+  .btn-secondary {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0.5rem;
+    padding: 1rem 2rem;
+    background: var(--color-surface-container-lowest);
+    color: var(--color-on-surface);
+    border: 1px solid var(--color-outline);
+    font-family: var(--font-mono);
+    font-size: 14px;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    transition: background var(--dur-medium);
+  }
+  .btn-secondary:hover {
+    background: var(--color-surface-variant);
+  }
+  .btn-sm {
+    padding: 0.5rem 1rem;
+    font-size: 12px;
+  }
+
+  /* System label - corner tags */
+  .system-label {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    letter-spacing: 0.05em;
+    color: var(--color-on-surface-variant);
+    background: var(--color-surface-container-lowest);
+    padding: 4px 8px;
+    border: 1px solid var(--color-outline-variant);
+  }
+
+  .meta-pill {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: var(--color-on-surface-variant);
+    background: var(--color-surface-container);
+    padding: 4px 8px;
+    border: 1px solid var(--color-outline-variant);
+  }
+
+  /* ────────────────────────────────────────────────────────────────
+     Body prose helper.
+     Used wherever we render multi-line legal / editorial copy:
+     methodology chapter bodies, audit explanations, debate panels.
+
+     We do NOT cap the .prose-body container itself (chapters embed
+     full-width grids and cards), but we DO cap the natural reading
+     elements inside it (p / ul / ol) to ~65ch for comprehension.
+     ──────────────────────────────────────────────────────────────── */
+  .prose-body {
+    font-size: var(--text-body-lg);
+    line-height: 1.65;
+    color: var(--color-on-surface);
+  }
+  .prose-body > p,
+  .prose-body > ul,
+  .prose-body > ol {
+    max-width: 65ch;
+  }
+  .prose-body > p + p,
+  .prose-body > * + p { margin-top: var(--space-4); }
+  .prose-body strong { font-weight: 600; }
+
+  /* Variant used on softer copy (subtitles, descriptions). */
+  .prose-body-muted {
+    max-width: 60ch;
+    font-size: var(--text-body);
+    line-height: 1.6;
+    color: var(--color-on-surface-variant);
+  }
+
+  /* Page-level vertical rhythm helpers. Apply to the outer <section>. */
+  .section-block      { padding-block: var(--space-7); }
+  .section-block-lg   { padding-block: var(--space-9); }
+}
+
+/* Material Symbols default weight */
+.material-symbols-outlined {
+  font-variation-settings: 'FILL' 0, 'wght' 300, 'GRAD' 0, 'opsz' 24;
+}
+.material-symbols-outlined.filled {
+  font-variation-settings: 'FILL' 1, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+}
+
+/* Loading spinner keyframes - used by AgentProgress and skeleton placeholders. */
+@keyframes lex-spin {
+  to { transform: rotate(360deg); }
+}
+@keyframes lex-skeleton-pulse {
+  0%, 100% { background-color: var(--color-surface-container); }
+  50%      { background-color: var(--color-surface-container-high); }
+}
+.lex-skeleton {
+  background-color: var(--color-surface-container);
+  animation: lex-skeleton-pulse 1.4s ease-in-out infinite;
+  border-radius: 2px;
+}

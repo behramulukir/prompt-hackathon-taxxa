@@ -12,10 +12,21 @@ import json
 import sqlite3
 from collections import deque
 from dataclasses import dataclass
+from datetime import date
 from pathlib import Path
 from typing import Iterable
 
-from src.models import Direction, Edge, EdgeType, Neighbor, Node, NodeMetadata, RetrievalPath
+from src.models import (
+    Direction,
+    Edge,
+    EdgeType,
+    EffectiveText,
+    Neighbor,
+    Node,
+    NodeMetadata,
+    RetrievalPath,
+    VersionStep,
+)
 
 
 @dataclass(frozen=True)
@@ -266,5 +277,159 @@ class GraphStore:
             out.setdefault(nid, None)
         return out
 
+    # ----- text_at — Step 10 / Move 4 point-in-time playback -------------
+
+    def text_at(
+        self,
+        section_id: str,
+        *,
+        as_of: date | None = None,
+    ) -> EffectiveText:
+        """Return the effective text of ``section_id`` as of ``as_of``.
+
+        Reads the per-section ``version_chain`` written by
+        ``scripts/compute_version_chains.py`` (Move 3) and plays the ops
+        forward up to and including ``as_of``. Each step's verb is
+        applied:
+
+          * ``original`` / ``muutetaan`` / ``lisätään`` — set text to
+            the step's ``new_text`` (or keep prior when ``new_text`` is
+            missing — a known data hole for chain_complex ops).
+          * ``kumotaan`` — set text to ``None`` (the section is repealed
+            as of this date).
+
+        When the section has no ``version_chain`` (clean ancestor
+        history), we return a single-step chain consisting of just the
+        original SECTION text, with ``has_future_amendments=False``.
+        That keeps callers simple — they don't have to special-case
+        unchanged sections.
+
+        ``as_of`` defaults to ``date.today()``. ``is_current`` is True
+        iff ``as_of`` equals today at call time.
+        """
+        today = date.today()
+        if as_of is None:
+            as_of = today
+        is_current = as_of == today
+
+        cur = self.conn.execute(
+            "SELECT text, metadata_json FROM nodes WHERE id = ?",
+            (section_id,),
+        )
+        row = cur.fetchone()
+        if row is None:
+            # Missing section — return an empty chain so the assembler
+            # still gets a typed result. The caller treats this the same
+            # as a regular missing chunk.
+            return EffectiveText(
+                text=None,
+                chain=[],
+                is_current=is_current,
+                has_future_amendments=False,
+            )
+
+        section_text = row["text"] or ""
+        try:
+            meta = json.loads(row["metadata_json"]) if row["metadata_json"] else {}
+        except json.JSONDecodeError:
+            meta = {}
+
+        raw_chain = meta.get("version_chain")
+        # No chain written → clean section, no amendments. Return the
+        # original text as the only step. We deliberately don't
+        # synthesise a date here; callers that need one read
+        # ``meta["publication_date"]`` separately.
+        if not isinstance(raw_chain, list) or not raw_chain:
+            single = VersionStep(
+                effective_date=_parse_iso_safe(meta.get("publication_date")),
+                source_id=section_id,
+                provenance="original",
+                text=section_text or None,
+                amendment_block_id=section_id,
+            )
+            return EffectiveText(
+                text=section_text or None,
+                chain=[single],
+                is_current=is_current,
+                has_future_amendments=False,
+            )
+
+        applied: list[VersionStep] = []
+        future: list[VersionStep] = []
+        current_text: str | None = None
+        for raw in raw_chain:
+            if not isinstance(raw, dict):
+                continue
+            step = _to_version_step(raw)
+            eff = step.effective_date
+            # Steps with no date are treated as "always applied" — they
+            # came from Move 1 ops that couldn't parse a voimaantulo
+            # clause, and dropping them silently would lose work. We
+            # apply them in declaration order, *before* checking the
+            # as_of cutoff for the next dated step.
+            if eff is None:
+                applied.append(step)
+                current_text = _apply_step(current_text, step)
+                continue
+            if eff <= as_of:
+                applied.append(step)
+                current_text = _apply_step(current_text, step)
+            else:
+                future.append(step)
+        return EffectiveText(
+            text=current_text,
+            chain=applied,
+            is_current=is_current,
+            has_future_amendments=bool(future),
+        )
+
     def close(self) -> None:
         self.conn.close()
+
+
+# --------------------------------------------------------------------------
+# Module-level helpers for ``text_at``
+# --------------------------------------------------------------------------
+
+
+def _parse_iso_safe(s) -> date | None:
+    if s is None:
+        return None
+    if isinstance(s, date):
+        return s
+    try:
+        return date.fromisoformat(str(s))
+    except (ValueError, TypeError):
+        return None
+
+
+def _to_version_step(raw: dict) -> VersionStep:
+    """Hydrate a dict from ``metadata.version_chain`` into VersionStep."""
+    return VersionStep(
+        effective_date=_parse_iso_safe(raw.get("effective_date")),
+        source_id=raw.get("source_id") or "",
+        provenance=raw.get("provenance") or "original",  # type: ignore[arg-type]
+        text=raw.get("text"),
+        amendment_block_id=raw.get("amendment_block_id"),
+    )
+
+
+def _apply_step(current: str | None, step: VersionStep) -> str | None:
+    """Play one step against the running text.
+
+    Semantics:
+      * ``original`` / ``muutetaan`` / ``lisätään`` — replace the running
+        text with the step's ``text`` *unless* the step carries no text
+        (some chain_complex ops have None new_text; keep current). For
+        ``lisätään`` on a section that didn't exist before, ``current``
+        is None and the step provides the birth-of-§ text.
+      * ``kumotaan`` — the section is repealed. We set text to None and
+        downstream callers render it as the explicit absence.
+    """
+    if step.provenance == "kumotaan":
+        return None
+    new_text = step.text
+    if new_text is None:
+        # Don't blank a previously-set text on a None-text step.
+        return current
+    return new_text

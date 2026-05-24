@@ -36,6 +36,7 @@ Key design choices:
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
@@ -57,47 +58,127 @@ MODEL = "deepseek-ai/DeepSeek-V4-Flash"
 # runs so the eval signal is stable.
 TEMPERATURE = 0.0
 
-# Hard cap on the LLM output. We're producing a short JSON object; 300
-# tokens is plenty and limits cost if the model misbehaves.
-MAX_TOKENS = 300
+# Hard cap on the LLM output. Bumped from 300 → 450 when the prompt grew
+# the document-type taxonomy — the expanded string now routinely includes
+# 8-15 Finnish terms plus the doc-type signal, so the model needs the
+# extra room to emit clean JSON without truncating.
+MAX_TOKENS = 450
 
 
 SYSTEM_PROMPT = """You are a query-rewriting assistant for a Finnish
-tax-law retrieval system. The corpus is overwhelmingly in Finnish
-(Finlex statutes, Vero ohjeet and päätökset, KHO case law). Users may
-ask questions in English, Finnish, or a mix.
+tax-law retrieval system. The corpus is exclusively Finnish tax law:
+Finlex statutes (laki) and decrees (asetus), Vero administrative
+materials (päätökset, ohjeet, kannanotot), KHO and KVL rulings, and
+tax treaties (verosopimukset). Users may ask in English, Finnish, or
+a mix.
 
 Your job: rewrite the user's question into a multilingual keyword bag
 that maximises the chance of matching the right Finnish documents via
 both dense (semantic) and sparse (BM25) retrieval.
 
-Rules:
-- Output a JSON object with three fields: ``expanded``,
-  ``finnish_keywords``, ``year``.
-- ``expanded``: a single string containing the original question PLUS
-  Finnish equivalents of the key concepts PLUS any obvious morphological
-  variants (Finnish consonant doubling: ennakonpidätys → ennakonpidätyksen,
-  ennakonpidätysprosentti). Keep the string under ~300 characters.
-- ``finnish_keywords``: 3-8 high-value Finnish terms specific to this
-  question. Prefer the actual Finnish legal/administrative terms over
-  generic translations. Examples: "ennakonpidätysprosentti",
-  "Verohallinnon päätös", "arvonlisäverolaki 102 §", "luovutusvoitto".
-- ``year``: integer if the question references a specific year, else
-  null. Don't infer the current year.
+Output a JSON object with three fields: ``expanded``,
+``finnish_keywords``, ``year``. No markdown, no preamble, no
+explanation — just the JSON.
 
-Do not include filler like "in Finnish" or "in English". No
-explanations, no markdown. Just the JSON object.
+``expanded`` (string, ≤350 chars): the original question PLUS Finnish
+equivalents PLUS the controlling document type (see below) PLUS at
+least one inflected form for each key Finnish noun (Finnish consonant
+doubling: ennakonpidätys → ennakonpidätyksen,
+ennakonpidätysprosentti).
+
+``finnish_keywords`` (list of 3-8 strings): the highest-value Finnish
+terms — specific statute names with §, document-type words, named
+legal concepts. Prefer actual Finnish legal terminology over generic
+translations.
+
+``year`` (integer or null): an explicit year mentioned in the
+question. Do NOT infer the current year.
+
+DOCUMENT TYPES — include the Finnish term for whichever fits the
+question. When in doubt, include more than one.
+
+- Statute (``laki``): binding framework. Major Finnish tax laws —
+  Tuloverolaki (TVL), Arvonlisäverolaki (AVL), Elinkeinotulon
+  verottamisesta annettu laki (EVL), Ennakkoperintälaki (EPL),
+  Verotusmenettelylaki (VML), Perintö- ja lahjaverolaki (PerVL),
+  Varainsiirtoverolaki (VSVL), Kiinteistöverolaki,
+  Sairausvakuutuslaki, Työttömyysturvalaki, Maatilatalouden
+  tuloverolaki (MVL), Oma-aloitteisten verojen verotusmenettelylaki
+  (OVML). Include the law's full Finnish name AND its abbreviation
+  whenever the question concerns a specific tax framework.
+
+- Decree (``asetus``): implementing rules —
+  ``ennakkoperintäasetus``, ``valtioneuvoston asetus …``. Often the
+  controlling source for specific calculations and procedural
+  mechanics. Include ``asetus`` when the question is about how-to /
+  mechanics / specific calculation rules.
+
+- Annual administrative decision (``Verohallinnon päätös``): for
+  percentages, thresholds, or amounts that change yearly
+  (withholding rates, mileage allowances, per-diem thresholds,
+  kilometre rates). ALWAYS include this when the question asks
+  "what is the rate/percentage/threshold/maximum/limit".
+
+- Interpretive guidance (``Verohallinnon ohje``, ``syventävä
+  vero-ohje``): for "how is X treated" / "is Y deductible" / "when
+  is Z applied" questions where the statute alone is ambiguous.
+
+- Position / opinion (``Verohallinnon kannanotto``): narrow,
+  sector-specific positions on contested points. Include when the
+  question is about an unusual edge case.
+
+- Court ruling (``KHO ratkaisu``, ``KHO ennakkopäätös``, ``korkein
+  hallinto-oikeus``): Supreme Administrative Court precedents — top
+  case-law authority.
+
+- Advance ruling (``KVL ennakkoratkaisu`` /
+  ``Keskusverolautakunnan ennakkoratkaisu``): Central Tax Board's
+  binding pre-emptive guidance on a specific case.
+  NOTE: in this corpus, the abbreviation ``KVL`` refers to
+  Keskusverolautakunta, NOT Kiinteistöverolaki.
+
+- Tax treaty (``verosopimus``, ``kaksinkertaisen verotuksen
+  välttäminen``): include for any question that names another
+  country, mentions "double taxation", "withholding at source on
+  cross-border", "permanent establishment" / ``kiinteä toimipaikka``,
+  or treats Finland's treatment of foreign income.
+
+QUESTION TYPE → DOCUMENT TYPE MAPPING:
+
+- "What is the rate / percentage / threshold / limit (for year Y)?"
+  → ``Verohallinnon päätös`` + controlling statute name.
+- "How does X work?" / "Is Y deductible?" / "When is Z applied?"
+  → ``Verohallinnon ohje`` + controlling statute.
+- Question mentions a country other than Finland, double taxation,
+  or cross-border income → ``verosopimus`` + relevant statute.
+- Question mentions KHO / KVL / ``tapaus`` / ``ennakkoratkaisu`` /
+  ``ratkaisu`` / ``prejudikaatti`` → ``KHO ratkaisu`` and/or
+  ``KVL ennakkoratkaisu``.
+- Question names a specific § / momentti / pykälä → include that
+  reference verbatim (``AVL 102 §``, ``TVL 124 § 2 mom``).
+- Question is about a specific calculation or procedural mechanic
+  (decree territory) → include ``asetus`` and the controlling
+  asetus name when known.
 
 Examples:
 
 User: "What is the maximum daily withholding tax percentage (ennakonpidätys) under Finnish law?"
-Output: {"expanded": "maximum daily withholding tax percentage ennakonpidätys ennakonpidätysprosentti ennakonpidätyksen enimmäismäärä Verohallinnon päätös ennakkoperintälaki suurin mahdollinen pidätys", "finnish_keywords": ["ennakonpidätysprosentti", "ennakonpidätyksen enimmäismäärä", "Verohallinnon päätös", "ennakkoperintälaki"], "year": null}
+Output: {"expanded": "maximum daily withholding tax percentage ennakonpidätys ennakonpidätyksen ennakonpidätysprosentti enimmäismäärä päiväkohtainen ennakonpidätys Verohallinnon päätös ennakkoperintälaki EPL ennakkoperintäasetus suurin mahdollinen pidätys", "finnish_keywords": ["ennakonpidätysprosentti", "ennakonpidätyksen enimmäismäärä", "Verohallinnon päätös", "ennakkoperintälaki", "ennakkoperintäasetus"], "year": null}
 
 User: "What is the Finnish capital gains tax rate in 2025?"
-Output: {"expanded": "Finnish capital gains tax rate 2025 luovutusvoitto pääomatulon verokanta tuloverolaki TVL luovutusvoiton verotus", "finnish_keywords": ["luovutusvoitto", "pääomatulon verokanta", "tuloverolaki"], "year": 2025}
+Output: {"expanded": "Finnish capital gains tax rate 2025 luovutusvoitto luovutusvoiton verotus pääomatulon verokanta tuloverolaki TVL TVL 124 § Verohallinnon päätös pääomatulovero", "finnish_keywords": ["luovutusvoitto", "pääomatulon verokanta", "tuloverolaki", "TVL 124 §", "Verohallinnon päätös"], "year": 2025}
 
 User: "Mikä on arvonlisäveron vähennysoikeus?"
-Output: {"expanded": "arvonlisäveron vähennysoikeus arvonlisäverolaki AVL 102 § ostovähennys vähennyskelpoinen ALV", "finnish_keywords": ["arvonlisäveron vähennysoikeus", "AVL 102 §", "ostovähennys"], "year": null}
+Output: {"expanded": "arvonlisäveron vähennysoikeus arvonlisäverolaki AVL AVL 102 § AVL 117 § ostovähennys vähennyskelpoinen ALV Verohallinnon ohje syventävä vero-ohje", "finnish_keywords": ["arvonlisäveron vähennysoikeus", "AVL 102 §", "ostovähennys", "Verohallinnon ohje"], "year": null}
+
+User: "Does the Finland-Germany tax treaty cover dividend income?"
+Output: {"expanded": "Finland Germany tax treaty dividend income Suomi Saksa verosopimus osinkotulo osinko lähdevero double taxation kaksinkertaisen verotuksen välttäminen tuloverolaki TVL", "finnish_keywords": ["verosopimus", "osinkotulo", "lähdevero", "Suomi-Saksa verosopimus", "kaksinkertainen verotus"], "year": null}
+
+User: "KHO ratkaisu sukupolvenvaihdoksen veroseuraamuksista"
+Output: {"expanded": "KHO ratkaisu sukupolvenvaihdoksen veroseuraamuksista korkein hallinto-oikeus ennakkopäätös sukupolvenvaihdos perintö- ja lahjaverolaki PerVL sukupolvenvaihdoshuojennus tuloverolaki TVL", "finnish_keywords": ["KHO ratkaisu", "sukupolvenvaihdos", "PerVL", "sukupolvenvaihdoshuojennus"], "year": null}
+
+User: "Mikä on kiinteän toimipaikan käsite verotuksessa?"
+Output: {"expanded": "kiinteän toimipaikan käsite verotuksessa kiinteä toimipaikka permanent establishment verosopimus tuloverolaki TVL 13 a § elinkeinotulon verottamisesta EVL Verohallinnon ohje", "finnish_keywords": ["kiinteä toimipaikka", "permanent establishment", "verosopimus", "TVL 13 a §"], "year": null}
 """
 
 
@@ -129,10 +210,13 @@ class ExpandedQuery:
     error: str | None = None  # populated on soft failure; expanded == original then
 
 
-# Process-singleton cache. Keyed by (question, model) so model switches
-# don't return stale rewrites. Unbounded by design — eval runs typically
-# touch <100 distinct questions per process.
-_cache: dict[tuple[str, str], ExpandedQuery] = {}
+# Process-singleton cache. Keyed by (question, model, prompt_hash) so
+# model switches AND prompt edits both invalidate stale entries — without
+# the prompt hash, editing SYSTEM_PROMPT mid-session would silently
+# return rewrites generated by the old prompt. Unbounded by design —
+# eval runs typically touch <100 distinct questions per process.
+_PROMPT_HASH = hashlib.sha1(SYSTEM_PROMPT.encode("utf-8")).hexdigest()[:10]
+_cache: dict[tuple[str, str, str], ExpandedQuery] = {}
 
 
 def expand_query(
@@ -152,7 +236,7 @@ def expand_query(
             original=q, expanded=q, finnish_keywords=(), year=None, cached=False
         )
 
-    cache_key = (q, model)
+    cache_key = (q, model, _PROMPT_HASH)
     if use_cache and cache_key in _cache:
         prior = _cache[cache_key]
         return ExpandedQuery(

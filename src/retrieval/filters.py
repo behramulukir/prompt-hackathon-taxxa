@@ -159,3 +159,96 @@ def infer_as_of_year(query: str) -> int | None:
     # the full 4-digit match.
     years = [int(m.group(0)) for m in _YEAR_RE.finditer(query)]
     return max(years) if years else None
+
+
+# --------------------------------------------------------------------------
+# Step 10 — point-in-time text resolution
+#
+# infer_as_of_date(query) returns the date the assembler should pass to
+# ``GraphStore.text_at()`` when fetching effective section text. The
+# semantics are deliberately distinct from ``infer_as_of_year``:
+#   - infer_as_of_year is a numeric year used by the reranker for soft
+#     date scoring (bump rows whose publication_date is <= the year).
+#   - infer_as_of_date is a concrete calendar date used by the version-
+#     chain playback (apply ops with effective_date <= this date).
+# A query that says "vuonna 2023" sets both; a query with no temporal
+# marker only sets a soft year (if any) and leaves the as-of date as
+# today.
+# --------------------------------------------------------------------------
+
+
+# Triggers that force the as-of date to *today*. We map these explicitly
+# even though "today" is the default — the difference matters for the
+# Verifier: an explicit "current" intent makes a TemporalMismatch a hard
+# error (the user asked for the current version); an implicit default
+# makes it a softer warning.
+_AS_OF_TODAY_TRIGGERS = (
+    "current ",
+    "currently",
+    "right now",
+    "as of today",
+    "in force",
+    "nykyinen",
+    "nykyiset",
+    "voimassa",
+    "tällä hetkellä",
+    "nyt voimassa",
+)
+
+# "vuonna YYYY" / "as of YYYY" / "YYYY tilanteessa" — explicit point-in-time.
+_AS_OF_YEAR_RE = re.compile(
+    r"\b(?:as\s+of|vuonna|year|tilanteessa|YYYY|in)\s*(\b(?:19|20)\d{2}\b)",
+    re.IGNORECASE,
+)
+
+# "before YYYY" / "ennen YYYY" — produces YYYY-1-12-31.
+_BEFORE_YEAR_RE = re.compile(
+    r"\b(?:before|prior\s+to|ennen)\s+(\b(?:19|20)\d{2}\b)",
+    re.IGNORECASE,
+)
+
+
+def infer_as_of_date(query: str, *, today: "date_t | None" = None):  # noqa: F821
+    """Map free-text query → a date for ``GraphStore.text_at(..., as_of=)``.
+
+    Returns ``(as_of, explicit)`` where:
+      * ``as_of`` is a ``datetime.date`` — never None. When no temporal
+        marker fires we return today (the most useful default for
+        "what does § N say" questions).
+      * ``explicit`` is True when the date was derived from a query
+        marker, False when we defaulted to today. The pipeline forwards
+        this flag to the Verifier so it can grade TemporalMismatches
+        accordingly (strict on explicit dates, advisory on defaults).
+
+    ``today`` is injectable for tests / deterministic runs; defaults to
+    ``date.today()`` at call time.
+    """
+    from datetime import date as date_t  # local import to keep module load light
+    base = today if today is not None else date_t.today()
+    q = query.lower()
+
+    # "before YYYY" wins over a plain year — it carries a directional
+    # signal ("not later than YYYY-1").
+    m = _BEFORE_YEAR_RE.search(q)
+    if m:
+        try:
+            yr = int(m.group(1))
+            return date_t(yr - 1, 12, 31), True
+        except ValueError:
+            pass
+
+    m = _AS_OF_YEAR_RE.search(q)
+    if m:
+        try:
+            yr = int(m.group(1))
+            # End-of-year is the conservative point-in-time choice for
+            # "vuonna 2023" — pick the latest moment within the year so
+            # mid-year amendments get included.
+            return date_t(yr, 12, 31), True
+        except ValueError:
+            pass
+
+    if any(t in q for t in _AS_OF_TODAY_TRIGGERS):
+        return base, True
+
+    return base, False
