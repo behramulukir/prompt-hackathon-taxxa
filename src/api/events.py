@@ -22,9 +22,33 @@ from src.indexing.graph_store import GraphStore
 from src.models import Node
 from src.retrieval.assemble import AssembledContext, Source
 
-# Edge types we surface as orbit arcs. Matches assemble.RENDERED_EDGE_TYPES
-# so the orbit reads like a compact preview of the assembled context.
-ORBIT_EDGE_TYPES: tuple[str, ...] = ("cites", "interprets", "amends", "defines")
+# Edge types we surface as orbit arcs.
+#
+# Goes wider than ``assemble.RENDERED_EDGE_TYPES`` because the orbit is a
+# visual graph (so structural ``parent_of`` is signal) where the assembled
+# LLM prompt deliberately omits it (would dilute citation accuracy).
+#
+# The full list of DB-native edge types lives on ``src.models.EdgeType``;
+# every entry below has a matching ``RELATION_LABEL`` on the frontend so
+# the chip never shows the raw SQL string.
+ORBIT_EDGE_TYPES: tuple[str, ...] = (
+    "parent_of",
+    "cites",
+    "interprets",
+    "amends",
+    "amends_section",
+    "repeals",
+    "applies",
+    "defines",
+)
+
+# How many ``parent_of`` arcs we let through per source. The LAW root of
+# 1551/1995 has ~100 SECTION children, and if every SECTION the assembler
+# brought back also lists a parent_of, the orbit would degenerate into a
+# starburst hub. We keep the top ones (sorted by graph_store insertion
+# order, which is doc-order) and drop the rest — the inspector still has
+# the full graph if the user wants to drill in.
+_MAX_PARENT_OF_PER_SOURCE = 2
 
 
 # ---------------------------------------------------------------------------
@@ -84,23 +108,68 @@ def authority_rank_for_ui(rank: int | None) -> int:
 # ---------------------------------------------------------------------------
 
 
-def _short_label(section_id: str, title: str | None, node_label: str | None) -> str:
+def _short_label(
+    section_id: str,
+    title: str | None,
+    node_label: str | None,
+    *,
+    root_title: str | None = None,
+) -> str:
     """Build a single-line label for the orbit chip.
 
-    Preference: explicit node label (``§ 3``) prepended to title; fall back
-    to title; fall back to the trailing ID segment so the chip is never
-    empty.
+    Composition (richest first, fall back as fields disappear):
+
+        "<label> · <title>"             — both present (e.g. "§ 3 · ...")
+        "<label> · <root_title>"        — section label inside a parent law (e.g.
+                                          "1.3 · Avainhenkilölaki") — keeps the
+                                          chip context-rich for deeply nested
+                                          Vero/Finlex sections that otherwise
+                                          render as bare numbers
+        "<title>"                       — root or guidance with title only
+        "<label>"                       — last resort before id sniffing
+        "<id_tail>"                     — pulled from the section_id
     """
     title = (title or "").strip()
     node_label = (node_label or "").strip()
+    root_title = (root_title or "").strip()
+
     if node_label and title:
         return f"{node_label} · {title}"
+    if node_label and root_title:
+        return f"{node_label} · {root_title}"
     if title:
         return title
+    if root_title:
+        return root_title
     if node_label:
         return node_label
     tail = section_id.split("/")[-1]
     return tail or section_id
+
+
+def _resolve_root_title(graph: GraphStore, node: Node | None) -> str | None:
+    """Walk up the parent_id chain to find the root LAW/GUIDE/CASE title.
+
+    Stops at the first ancestor with a title set, or when ``parent_id`` is
+    None (root reached). Bounded at 8 hops so a malformed graph can't loop.
+    """
+    if node is None:
+        return None
+    if getattr(node, "title", None):
+        return node.title
+    parent_id = node.parent_id
+    seen: set[str] = set()
+    for _ in range(8):
+        if not parent_id or parent_id in seen:
+            return None
+        seen.add(parent_id)
+        parent = graph.get_node(parent_id)
+        if parent is None:
+            return None
+        if getattr(parent, "title", None):
+            return parent.title
+        parent_id = parent.parent_id
+    return None
 
 
 def build_orbit(
@@ -133,6 +202,7 @@ def build_orbit(
         title = getattr(node, "title", None) if node else None
         label_field = getattr(node, "label", None) if node else None
         node_type = node.type if node else None
+        root_title = _resolve_root_title(graph, node) if node else None
 
         # Pull subcorpus + flags off the chunk header that the rerank step
         # already stashed onto the Source's rendered_block — but we have it
@@ -150,7 +220,9 @@ def build_orbit(
             {
                 "id": src.chunk_id,
                 "kind": node_kind_for(node_type, subcorpus),
-                "label": _short_label(src.section_id, title, label_field),
+                "label": _short_label(
+                    src.section_id, title, label_field, root_title=root_title
+                ),
                 "authorityRank": authority_rank_for_ui(authority_rank),
                 "isActive": in_force is not False,
                 "isCenter": i == 0,

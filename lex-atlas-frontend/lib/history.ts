@@ -54,7 +54,19 @@ function read(): HistoryEntry[] {
     if (!raw) return [];
     const parsed = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
-    return parsed.filter(isEntry).slice(0, MAX);
+    // Drop entries whose ``id`` is already present earlier in the list.
+    // localStorage can pick up duplicates from older bug versions where
+    // the 8-hex-char id occasionally collided; we self-heal on every read
+    // so React's keyed-list invariant holds even for pre-existing data.
+    const seen = new Set<string>();
+    const out: HistoryEntry[] = [];
+    for (const v of parsed) {
+      if (!isEntry(v)) continue;
+      if (seen.has(v.id)) continue;
+      seen.add(v.id);
+      out.push(v);
+    }
+    return out.slice(0, MAX);
   } catch {
     return [];
   }
@@ -84,9 +96,17 @@ export function useQueryHistory() {
 
   const push = useCallback((entry: Omit<HistoryEntry, "ts">) => {
     setEntries((prev) => {
-      // Dedupe: same question+asof bumps to the top instead of duplicating.
+      // Dedupe on TWO axes:
+      //   1. ``id`` — covers the "onComplete fired twice" path (React 19
+      //      StrictMode double-invoke, or any caller that retries push)
+      //      and any pre-existing duplicate-id leftovers in localStorage.
+      //   2. ``question + asof`` — keeps the list reading like a normal
+      //      recent-files panel: re-asking the same thing bumps the
+      //      existing entry to the top instead of stacking.
       const filtered = prev.filter(
-        (e) => !(e.question === entry.question && e.asof === entry.asof)
+        (e) =>
+          e.id !== entry.id &&
+          !(e.question === entry.question && e.asof === entry.asof)
       );
       const next: HistoryEntry[] = [
         { ...entry, ts: Date.now() },

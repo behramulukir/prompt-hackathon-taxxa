@@ -85,7 +85,11 @@ export async function POST(req: NextRequest) {
         }
       }
 
-      send({ type: "done" });
+      // NOTE: do NOT emit a second `done` here. Both the sidecar and the
+      // fixture replay already terminate their event sequence with a
+      // `done` event. Sending another one made AnswerStream's onComplete
+      // fire twice, which in turn pushed two history entries with the
+      // same query id and tripped React's keyed-list invariant.
       controller.close();
     },
   });
