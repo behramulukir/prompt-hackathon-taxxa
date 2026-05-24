@@ -1,50 +1,253 @@
 /**
- * /methodology — Stitch port. Tech deep-dive with column layout:
- * 3-col left "CHAPTER 0X" label + 9-col right content with `border-t`
- * thin dividers. Headlines in Garamond with italic second lines.
+ * /methodology
+ *
+ * Two-part page anchored to Taxxa's 23.05 chat. Every claim cited to a
+ * file path or a research paper. Audited for accuracy on 24.05 against
+ * the actual repo.
  */
 
 import { Header } from "@/components/Header";
 
-interface AgentCard {
-  number: string;
-  title: string;
-  body: string;
-  trace: string;
+/* ─────────────────────────────────────────────────────────────────
+ * Data
+ * ──────────────────────────────────────────────────────────────── */
+
+interface ChatPoint {
+  n: string;
+  topic: string;
+  quote: string;
 }
 
-const AGENTS: AgentCard[] = [
+const TEAM_CHAT: ChatPoint[] = [
+  { n: "01", topic: "Pricing", quote: "€60 per user per month. Queries have to be cheap." },
+  { n: "02", topic: "Corpus", quote: "Connect Finlex, Vero, case law. EU-lex out of scope." },
+  { n: "03", topic: "Authority", quote: "Case laws refer to Finlex. Vero is just an interpreter. Case laws can overwrite Vero." },
+  { n: "04", topic: "Retrieval", quote: "Can't bring 1,000 chunks per question. 25M-page DB." },
+  { n: "05", topic: "Timeline", quote: "Active now, not then, not later." },
+  { n: "06", topic: "Stack", quote: "Run RAG locally first. DeepSeek is good and cheap." },
+  { n: "07", topic: "Extraction", quote: "Reference-extraction by regex / NLP is a good idea. We aren't doing it." },
+];
+
+interface ExploredCard {
+  number: string;
+  title: string;
+  italic: string;
+  body: string;
+  sources: string[];
+  killedBy: string[];
+  cut: string;
+}
+
+const EXPLORED: ExploredCard[] = [
   {
-    number: "AGENT.01",
-    title: "Planner",
-    body: "Deconstructs complex user queries into sequential, actionable execution steps before any retrieval occurs.",
-    trace: "> INIT: Task_Decomposition",
+    number: "01",
+    title: "Bitemporal graph on Neo4j",
+    italic: "every edge with its own validity window.",
+    body: "Schema from SAT-Graph RAG (JURIX 2025). The whole ontology in a graph database.",
+    sources: ["SAT-Graph RAG · arXiv:2505.00039", "LRMoo · IFLA"],
+    killedBy: ["01"],
+    cut: "Two days into the ontology, still zero answers. We kept the bitemporal idea and rebuilt it in SQLite as version_chain (see RAGTAG #08).",
   },
   {
-    number: "AGENT.02",
-    title: "Extractor",
-    body: "Navigates the structured topology to surface highly relevant legal clauses and metadata based on the Planner's blueprint.",
-    trace: "> EXEC: Semantic_Query",
+    number: "02",
+    title: "BGE-M3 hybrid retrieval",
+    italic: "dense + sparse + ColBERT, fused at k=60.",
+    body: "BAAI's multilingual model with three signal heads. RRF for fusion, HyDE for English to Finnish query expansion.",
+    sources: ["BGE-M3 · BAAI", "ColBERT · SIGIR 2020", "RRF · SIGIR 2009", "HyDE · Gao et al. 2022"],
+    killedBy: ["01"],
+    cut: "Voyage voyage-3-large already ranked the right chunk in the top 30 on every eval question. Adding a second stack failed the cost test.",
   },
   {
-    number: "AGENT.03",
-    title: "Verifier",
-    body: "An adversarial agent that cross-references extracted data against immutable source documents to ensure zero hallucination.",
-    trace: "> AUDIT: Fact_Check_Strict",
+    number: "03",
+    title: "Courtroom-style debate",
+    italic: "prosecutor, defense, judge.",
+    body: "Three LLMs arguing per conflict, pattern from AgenticSimLaw.",
+    sources: ["AgenticSimLaw · arXiv:2601.21936", "Multi-Agent Debate · NeurIPS 2023"],
+    killedBy: ["03", "01"],
+    cut: "Chat #03 handed us the rule directly. One integer compare resolves every conflict in our eval set; seven LLM turns cost real money.",
   },
   {
-    number: "AGENT.04",
-    title: "Clarifier",
-    body: "Synthesizes verified data into structured, authoritative responses formatted for legal comprehension and immediate utility.",
-    trace: "> FORMAT: Legal_Brief",
+    number: "04",
+    title: "63,660-node constellation",
+    italic: "WebGL force layout of the whole corpus.",
+    body: "Attribution view inspired by Anthropic Circuit Tracer.",
+    sources: ["@cosmos.gl/graph", "Anthropic Circuit Tracing · 2025"],
+    killedBy: ["04"],
+    cut: "Judges need one answer's reasoning, not the corpus shape. The reasoning panel animates the 5 to 10 nodes that actually mattered.",
+  },
+  {
+    number: "05",
+    title: "Live SPARQL fallback",
+    italic: "CRAG escalation into Semantic Finlex.",
+    body: "Self-RAG reflection tokens to enforce citation coverage at draft time.",
+    sources: ["CRAG · arXiv:2401.15884", "Self-RAG · ICLR 2024", "data.finlex.fi/sparql"],
+    killedBy: ["01"],
+    cut: "Cold SPARQL hit 9 seconds on the public endpoint. We can surface 'unsure' offline via AmendmentCaveat instead (RAGTAG #08).",
+  },
+  {
+    number: "06",
+    title: "EU-lex contradictions",
+    italic: "primacy of EU law over national act.",
+    body: "Ingest EUR-Lex directives, model a transposes edge, surface EU vs national conflicts.",
+    sources: ["EUR-Lex · hierarchy of norms", "Lex superior · UN OLA"],
+    killedBy: ["02"],
+    cut: "Chat #02 declared this out of scope. Adding it later is not an architectural rewrite: the `transposes` edge type is already in the EdgeType enum, the authority-rank lattice extends to an EU tier with one number, and the strategy router treats it as another `cross_source` route. New corpus, not new infrastructure.",
   },
 ];
 
-const GRAPHRAG_POINTS = [
-  "Entity Resolution: disambiguating complex legal entities across jurisdictions.",
-  "Semantic Pathfinding: tracing precedence through interconnected case law.",
-  "Contextual Grounding: pinning generation strictly to verified nodes.",
-  "Temporal Filtering: every Cypher walk filters on t_valid ≤ asof < t_invalid.",
+interface ShippedCard {
+  number: string;
+  title: string;
+  italic: string;
+  body: string;
+  sources: string[];
+  delivers: string[];
+}
+
+const SHIPPED: ShippedCard[] = [
+  {
+    number: "01",
+    title: "Three deterministic extraction passes",
+    italic: "structural, anchor, regex.",
+    body: "Edges are emitted by three rule-based passes over HTML and the document tree: structural (parent_of from the heading hierarchy), anchor (cross-references inside an <a href> attribute), and regex (text citations like '§ 102 AVL', 'KHO 2025:46'). No model in the batch graph build.",
+    sources: [
+      "src/extraction/structural_edges.py",
+      "src/extraction/anchor_edges.py",
+      "src/extraction/citations_regex.py",
+      "src/extraction/definition_edges.py",
+    ],
+    delivers: ["07"],
+  },
+  {
+    number: "02",
+    title: "Two SQLite tables plus a local LanceDB",
+    italic: "nodes, edges, chunks. Joined by section_id.",
+    body: "1,967,776 nodes and 2,180,769 typed edges live in two SQLite tables (nodes, edges). 402,088 embedded chunks live in LanceDB on the filesystem (no remote service). Everything joins on section_id with an O(1) lookup.",
+    sources: [
+      "scripts/load_graph.py (nodes, edges CREATE TABLE)",
+      "findings/04a_index_sanity.md (402,088 chunks)",
+      "findings/04b_load_report.md (1.97M nodes, 2.18M edges)",
+      "src/indexing/vector_store.py (LanceDB)",
+    ],
+    delivers: ["01"],
+  },
+  {
+    number: "03",
+    title: "Section-anchored chunking",
+    italic: "800 to 1,500 tokens, 2,000 hard max, never split mid-citation.",
+    body: "The chunk unit is the SECTION (§). Children are greedily packed under their § head and never split across sentence, item, or citation boundaries. The result: every chunk carries its own legal anchor.",
+    sources: ["pipeline/chunks.py"],
+    delivers: ["04"],
+  },
+  {
+    number: "04",
+    title: "Multilingual embeddings via Voyage",
+    italic: "voyage-3-large, 1,024-dim, asymmetric query / document.",
+    body: "Hosted but cheap. Asymmetric (input_type='query' vs 'document') to avoid the quality cliff Voyage warns about. Same embedding space carries Finnish, Swedish, and English.",
+    sources: ["src/indexing/voyage_client.py (MODEL = voyage-3-large)", "voyageai.com"],
+    delivers: ["02"],
+  },
+  {
+    number: "05",
+    title: "Strategy router, six presets",
+    italic: "case_law, recency, definition, cross_source, multi_hop, default.",
+    body: "A keyword and regex classifier on the question text picks one ExpansionStrategy. Each preset sets seed depth, edge types, BFS direction, max hops, and per-edge degree caps. Default falls back to vector-only retrieval.",
+    sources: ["src/retrieval/strategy.py"],
+    delivers: ["04"],
+  },
+  {
+    number: "06",
+    title: "Bounded BFS with hub-skip",
+    italic: "interprets_in > 30, cites_out > 15, parent_of_in > 50.",
+    body: "Default max_hops = 1. Hub nodes (widely cited statutes) are not expanded through. Final candidate set is truncated to fit a 25k-token context.",
+    sources: ["src/retrieval/graph_expand.py"],
+    delivers: ["04"],
+  },
+  {
+    number: "07",
+    title: "Two reranking paths, one cross-encoder",
+    italic: "v2 uses bge-reranker-v2-m3, v1 uses metadata signals.",
+    body: "v2 runs BAAI/bge-reranker-v2-m3 (a multilingual cross-encoder) over 30 to 40 candidates and combines 0.6 cross-encoder + 0.3 cosine + 0.1 metadata. v1 (the default path in the API sidecar today) uses a metadata reranker: authority_rank, recency, term overlap.",
+    sources: [
+      "src/retrieval/cross_encoder_rerank.py (bge-reranker-v2-m3)",
+      "src/retrieval/rerank.py (metadata reranker)",
+    ],
+    delivers: ["04"],
+  },
+  {
+    number: "08",
+    title: "Temporal correctness",
+    italic: "version_chain, as_of, AmendmentCaveat. All deterministic.",
+    body: "Every SECTION carries a chronological version_chain of muutetaan, kumotaan, lisätään steps. GraphStore.text_at(section_id, as_of) plays it forward. Every cited chunk on a stale ancestor emits an AmendmentCaveat (suspect, stale, repealed). A separate check_temporal_mismatches function compares the drafted answer against the section's chain via difflib; no LLM in this check.",
+    sources: [
+      "src/indexing/graph_store.py (text_at)",
+      "src/models.py (VersionStep, AmendmentCaveat)",
+      "src/agents/verifier.py (check_temporal_mismatches)",
+      "src/retrieval/pipeline_v2.py (wires both)",
+    ],
+    delivers: ["05"],
+  },
+  {
+    number: "09",
+    title: "Authority is one integer",
+    italic: "Finlex 100, Treaty 90, KHO 80, Vero 60.",
+    body: "Ranks are assigned at ingestion from source / source_subcorpus and stored on every node. Conflict surfacing compares the integer; the team's lattice (Finlex over Vero, KHO can overwrite Vero) drops out of this directly.",
+    sources: [
+      "src/extraction/authority.py",
+      "findings/03_authority_ranks.md",
+      "Lex superior · UN OLA",
+    ],
+    delivers: ["03"],
+  },
+  {
+    number: "10",
+    title: "Generation via DeepSeek-V4-Flash",
+    italic: "hosted on Featherless. Query-rewrite is cached.",
+    body: "The drafter is deepseek-ai/DeepSeek-V4-Flash served via Featherless. Per-question query rewrites are cached in process, which lowers cost on repeated framings. Per-query answers are not cached today; a localStorage history in the Next.js UI lets the user recall past questions but does not skip the call.",
+    sources: [
+      "src/retrieval/generate.py (MODEL = deepseek-ai/DeepSeek-V4-Flash)",
+      "src/retrieval/query_rewrite.py (in-process cache)",
+      "Featherless · featherless.ai",
+    ],
+    delivers: ["06", "01"],
+  },
+];
+
+interface Receipt {
+  k: string;
+  label: string;
+  body: string;
+}
+
+const RECEIPTS: Receipt[] = [
+  { k: "Q1", label: "Capital income > €30k", body: "Single cite, TVL § 124. No graph hop. The baseline case." },
+  { k: "Q12", label: "Meal voucher VAT", body: "Three cites: KHO 2025:46, KVL:004/2024, Vero ohje. Two graph hops via cites and interprets." },
+  { k: "Q41", label: "Avainhenkilö 48 vs 84 months", body: "Rank-100 Finlex statute outranks rank-60 Vero kannanotto. Verifier picks Finlex." },
+  { k: "Cost", label: "Local · hosted · brief cap", body: "€0.005 local · €0.04 hosted · €1 brief cap. The cost meter UI is a char-count heuristic, not API billing." },
+];
+
+interface Lesson {
+  k: string;
+  title: string;
+  body: string;
+  source: string;
+}
+
+const LESSONS: Lesson[] = [
+  {
+    k: "01",
+    title: "Mojibake recovered through the graph",
+    body:
+      "About 1.7% of chunks were double-encoded: the HTML sniffer mis-detected UTF-8 as Latin-1 and produced 'päätös → pรครคtรถs'-style chunks in LanceDB. We caught it by tracing RAG hits back to source files, fixed the parse layer to force UTF-8, and re-embedded the affected slice. The graph spine made the recovery surgical, not corpus-wide.",
+    source: "scripts/reingest_corrupted_chunks.py · pipeline/html_utils.py",
+  },
+  {
+    k: "02",
+    title: "Not every tax question is in the law",
+    body:
+      "Eval question N49 asks about the account-number range commonly used for trade receivables and payables (myyntisaamiset / ostovelat) in the Finnish chart of accounts. Our system returned the correct legal answer (no universally binding range exists), which did not match the question-bank reference. The reference traces to KILA practice and platform-specific defaults, not Finlex. Honest UX would surface that the law is silent here and the convention lives elsewhere.",
+    source: "eval/questions.json · question N49",
+  },
 ];
 
 const RESEARCH = [
@@ -52,15 +255,23 @@ const RESEARCH = [
   ["TG-RAG", "Han et al., 2025", "arXiv:2510.13590"],
   ["LRMoo v1.1.1", "IFLA, 2026", "cidoc-crm.org/LRMoo"],
   ["Semantic Finlex", "SeCo Aalto + MoJ", "data.finlex.fi/sparql"],
-  ["Self-RAG", "Asai et al., 2024", "ICLR 2024 oral"],
+  ["Self-RAG", "Asai et al., 2024", "ICLR 2024"],
   ["CRAG", "Yan et al., 2024", "arXiv:2401.15884"],
   ["HyDE", "Gao et al., 2022", "Precise Zero-Shot Dense Retrieval"],
-  ["DSPy + MIPROv2", "Khattab et al., Stanford NLP", "dspy.ai"],
-  ["Multi-Agent Debate", "Du et al., NeurIPS 2023", "arXiv:2305.14325"],
   ["AgenticSimLaw", "Jan 2026", "arXiv:2601.21936"],
+  ["Multi-Agent Debate", "Du et al., NeurIPS 2023", "arXiv:2305.14325"],
   ["BGE-M3", "Chen et al., BAAI", "bge-model.com"],
-  ["Anthropic Circuit Tracing", "Mar 2025", "transformer-circuits.pub"],
+  ["bge-reranker-v2-m3", "BAAI", "bge-model.com"],
+  ["ColBERT", "Khattab + Zaharia", "SIGIR 2020"],
+  ["RRF", "Cormack et al.", "SIGIR 2009"],
+  ["Voyage voyage-3-large", "Voyage AI", "voyageai.com"],
+  ["Anthropic Circuit Tracing", "Anthropic, 2025", "transformer-circuits.pub"],
+  ["UN OLA · lex superior", "UN Office of Legal Affairs", "a_cn4_l682.pdf"],
 ];
+
+/* ─────────────────────────────────────────────────────────────────
+ * Page
+ * ──────────────────────────────────────────────────────────────── */
 
 export default function MethodologyPage() {
   return (
@@ -69,317 +280,213 @@ export default function MethodologyPage() {
 
       <div
         className="mx-auto w-full max-w-6xl flex-grow px-6"
-        style={{ paddingBlock: "var(--space-9)", display: "flex", flexDirection: "column", gap: "var(--space-9)" }}
+        style={{ paddingBlock: "var(--space-8)", display: "flex", flexDirection: "column", gap: "var(--space-7)" }}
       >
-        {/* Hero - uses the same 2/10 grid as Chapter sections below so the
-            small section label aligns with CHAPTER labels and the title +
-            body sit in the same right-rail as the chapter content. */}
+        {/* Hero */}
         <section className="grid grid-cols-1 md:grid-cols-12" style={{ gap: "var(--space-5)" }}>
           <div className="md:col-span-2">
             <p
               className="font-mono uppercase tracking-widest text-secondary"
               style={{ fontSize: "var(--text-overline)" }}
             >
-              Architecture &amp; Methodology
+              Methodology
             </p>
           </div>
           <div className="md:col-span-10">
             <h1
               className="font-serif font-medium text-primary"
               style={{
-                marginBottom: "var(--space-5)",
-                fontSize: "clamp(40px, 5.5vw, 72px)",
+                marginBottom: "var(--space-3)",
+                fontSize: "clamp(36px, 5vw, 64px)",
                 lineHeight: 1.05,
                 letterSpacing: "-0.02em",
               }}
             >
-              Technical Rigor.
-              <br />
-              <span className="italic text-on-surface-variant">
-                Transparent Execution.
-              </span>
+              Built from a chat,{" "}
+              <span className="italic text-on-surface-variant">line by line.</span>
             </h1>
-            <p className="prose-body-muted">
-              RAGTAG is built for absolute clarity. This document outlines
-              the foundational pillars of the architecture we initially
-              explored, designed for senior auditors and compliance
-              professionals who require uncompromising reliability in
-              data topology and agentic workflows.
-            </p>
-
-            {/* Honest-status banner — this page describes the architecture
-                we *explored* during the hackathon, not the shipping system.
-                The About page covers what actually runs in production. */}
-            <div
-              className="mt-6 flex items-start gap-3 border border-outline-variant bg-surface-container-low"
-              style={{
-                padding: "var(--space-4) var(--space-5)",
-              }}
-              role="note"
-              aria-label="Status notice"
+            <p
+              className="text-on-surface-variant"
+              style={{ maxWidth: "62ch", fontSize: "var(--text-body-lg)" }}
             >
-              <span
-                className="material-symbols-outlined text-on-surface-variant"
-                style={{ fontSize: "var(--icon-md)", marginTop: 2 }}
-                aria-hidden
-              >
-                info
-              </span>
-              <div>
-                <div
-                  className="font-mono uppercase tracking-widest text-on-surface"
-                  style={{ fontSize: "var(--text-overline)" }}
-                >
-                  Reference only · not what ships
-                </div>
-                <p
-                  className="mt-1 font-sans text-on-surface-variant"
-                  style={{ fontSize: "var(--text-body-sm)", lineHeight: 1.55 }}
-                >
-                  This page describes the architecture we explored during the
-                  hackathon but did <strong>not</strong> end up shipping. See{" "}
-                  <a
-                    href="/about"
-                    className="font-mono text-secondary hover:underline"
-                  >
-                    /about
-                  </a>{" "}
-                  for the system that actually backs <strong>/ask</strong>.
-                </p>
-              </div>
-            </div>
+              <span className="font-mono text-secondary">RAGTAG</span>{" "}
+              (Retrieval Augmented Graph Tax Answer Generator) takes a tax
+              question, retrieves the relevant Finnish statutes, court
+              rulings and Vero guidance, and answers with citations. Every
+              decision below is tagged either to a paper or to a numbered
+              point from Taxxa&rsquo;s team chat on 23.05. We will present
+              the demo live.
+            </p>
           </div>
         </section>
 
-        {/* Chapter 01 — Second Brain */}
-        <Chapter num="01" title="The Second Brain" italic="structured topology." insightMarker>
-          <p className="mb-4">
-            At the core of the explored architecture lies a structured topology that acts as a
-            secure, immutable "Second Brain." We eschew flat vector stores in
-            favor of a multidimensional semantic network. Every piece of
-            legislation, case law, and Vero guidance is mapped not just by
-            keywords, but by ontological relationships grounded in the LRMoo /
-            FRBR-extended schema published by IFLA and mirrored from Semantic
-            Finlex's RDF endpoint.
-          </p>
-          <div
-            className="border border-outline-variant bg-surface-container-lowest"
-            style={{
-              marginTop: "var(--space-6)",
-              paddingInline: "var(--space-6)",
-              paddingBlock: "var(--space-5)",
-            }}
-          >
-            <div
-              className="flex items-center justify-between border-b border-outline-variant"
-              style={{
-                marginBottom: "var(--space-5)",
-                paddingBottom: "var(--space-3)",
-              }}
-            >
-              <span
-                className="font-mono uppercase tracking-widest text-on-surface"
-                style={{ fontSize: "var(--text-overline)" }}
-              >
-                System Architecture
-              </span>
-              <span
-                className="font-mono text-outline"
-                style={{ fontSize: "var(--text-overline)" }}
-              >
-                v2.4.1
-              </span>
-            </div>
-            <ArchSchema />
+        {/* Chat */}
+        <section className="grid grid-cols-1 md:grid-cols-12" style={{ gap: "var(--space-5)" }}>
+          <div className="md:col-span-2">
             <p
-              className="font-mono italic text-on-surface-variant"
-              style={{
-                marginTop: "var(--space-5)",
-                fontSize: "var(--text-overline)",
-                lineHeight: 1.5,
-              }}
+              className="font-mono uppercase tracking-widest text-secondary"
+              style={{ fontSize: "var(--text-overline)" }}
             >
-              Fig 1.1 · LRMoo-aligned node classes propagating CTV aggregation up the hierarchy.
+              Chat · 23.05
             </p>
           </div>
-        </Chapter>
-
-        {/* Chapter 02 — From RAG to GraphRAG */}
-        <Chapter num="02" title="From RAG to GraphRAG" italic="multi-hop reasoning over typed edges.">
-          <p className="mb-4">
-            Standard Retrieval-Augmented Generation is insufficient for complex
-            legal queries that require multi-hop reasoning. We employ a typed
-            graph traversal layered on top of BGE-M3 hybrid retrieval (dense +
-            sparse + multi-vector) with Reciprocal Rank Fusion at k=60, then
-            rerank with bge-reranker-v2-m3.
-          </p>
-          <ul className="mt-4 space-y-2 font-sans" style={{ fontSize: 16 }}>
-            {GRAPHRAG_POINTS.map((p) => (
-              <li key={p} className="flex items-start gap-2">
-                <span
-                  className="material-symbols-outlined text-secondary"
-                  style={{ fontSize: 16, marginTop: 4 }}
-                >
-                  check_circle
-                </span>
-                <span>{p}</span>
-              </li>
-            ))}
-          </ul>
-        </Chapter>
-
-        {/* Chapter 03 — Temporal logic */}
-        <Chapter num="03" title="Temporal Logic" italic="every edge has a validity window.">
-          <p className="mb-4">
-            Every relationship in the graph carries a bitemporal{" "}
-            <span className="font-mono text-sm text-secondary">(t_valid, t_invalid)</span>{" "}
-            window. Drag the date slider in the workspace and the answer rewrites
-            itself live, not via re-query but via a CSS-selector swap over the
-            cached subgraph. The agent cannot accidentally answer a 2026
-            question with a 2024 rule.
-          </p>
-          <p>
-            Implementation: Neo4j 2026.01+ ships a <span className="font-mono text-sm">SEARCH</span>{" "}
-            clause with in-index temporal filtering. The HNSW vector index
-            behaves as if it only contained vectors valid at{" "}
-            <span className="font-mono text-sm">$asof</span>, keeping latency
-            sub-100ms even on a 250k-edge graph.
-          </p>
-        </Chapter>
-
-        {/* Chapter 04 — The Debate */}
-        <Chapter num="04" title="The Debate" italic="when sources disagree, make the argument visible." insightMarker>
-          <p className="mb-4">
-            Modeled on AgenticSimLaw (arXiv:2601.21936, Jan 2026): a courtroom-style
-            7-turn protocol with explicit prosecutor / defense / judge roles. When
-            our Verifier detects two equal-rank sources disagreeing (typically a
-            Vero ohje vs a later KHO ruling), two Drafter agents read opposing
-            sides of the priority lattice and stream their arguments side-by-side.
-            A Judge resolves via the explicit lattice. Watching the AI argue
-            with itself is the trust artifact.
-          </p>
-        </Chapter>
-
-        {/* Chapter 05 — Agents */}
-        <Chapter num="05" title="Where agents earn their keep" italic="specialised narrow-scope reasoning." insightMarker>
-          <p
-            className="mb-8 max-w-3xl text-on-background"
-            style={{ fontSize: 18, lineHeight: 1.55 }}
-          >
-            Our system delegates tasks to specialised, narrow-scope AI agents.
-            This separation of concerns ensures that reasoning, extraction, and
-            verification are distinct processes, dramatically reducing
-            hallucination rates and increasing auditability.
-          </p>
           <div
-            className="grid grid-cols-1 sm:grid-cols-2"
-            style={{ gap: "var(--space-5)" }}
+            className="border-t-2 border-primary md:col-span-10"
+            style={{ paddingTop: "var(--space-4)" }}
           >
-            {AGENTS.map((a) => (
+            <ul
+              className="grid grid-cols-1 sm:grid-cols-2"
+              style={{ columnGap: "var(--space-5)", rowGap: "var(--space-3)" }}
+            >
+              {TEAM_CHAT.map((p) => (
+                <li
+                  key={p.n}
+                  className="border border-outline-variant bg-surface-container-lowest"
+                  style={{ paddingInline: "var(--space-3)", paddingBlock: "var(--space-3)" }}
+                >
+                  <div
+                    className="flex items-baseline justify-between"
+                    style={{ gap: "var(--space-3)", marginBottom: 4 }}
+                  >
+                    <span
+                      className="font-mono uppercase tracking-widest text-on-surface"
+                      style={{ fontSize: "var(--text-overline)" }}
+                    >
+                      {p.topic}
+                    </span>
+                    <span
+                      className="font-mono text-secondary"
+                      style={{ fontSize: "var(--text-overline)" }}
+                    >
+                      #{p.n}
+                    </span>
+                  </div>
+                  <p
+                    className="italic text-on-surface-variant"
+                    style={{ fontSize: "var(--text-body)", lineHeight: 1.5 }}
+                  >
+                    &ldquo;{p.quote}&rdquo;
+                  </p>
+                </li>
+              ))}
+            </ul>
+          </div>
+        </section>
+
+        {/* Part I */}
+        <PartHeader part="Part I" title="What we tried." italic="And what chat point killed it." />
+        {EXPLORED.map((c) => (
+          <ExploredChapter key={c.number} card={c} />
+        ))}
+
+        {/* Part II */}
+        <PartHeader
+          part="Part II"
+          title="RAGTAG."
+          italic="Ten pieces. Each cites file paths or papers."
+          insightMarker
+        />
+        {SHIPPED.map((c) => (
+          <ShippedChapter key={c.number} card={c} />
+        ))}
+
+        {/* Receipts */}
+        <section className="grid grid-cols-1 md:grid-cols-12" style={{ gap: "var(--space-5)" }}>
+          <div className="md:col-span-2">
+            <p
+              className="font-mono uppercase tracking-widest text-secondary"
+              style={{ fontSize: "var(--text-overline)" }}
+            >
+              Receipts
+            </p>
+          </div>
+          <div
+            className="md:col-span-10 grid grid-cols-1 sm:grid-cols-2 border-t border-outline-variant"
+            style={{ paddingTop: "var(--space-4)", gap: "var(--space-3)" }}
+          >
+            {RECEIPTS.map((r) => (
               <div
-                key={a.number}
-                className="group border border-outline-variant bg-surface-container-lowest transition-colors hover:bg-surface-container-low"
-                style={{
-                  paddingInline: "var(--space-6)",
-                  paddingBlock: "var(--space-5)",
-                }}
+                key={r.k}
+                className="border border-outline-variant bg-surface-container-lowest"
+                style={{ paddingInline: "var(--space-4)", paddingBlock: "var(--space-3)" }}
               >
                 <div
-                  className="flex items-baseline justify-between border-b border-outline-variant"
-                  style={{
-                    marginBottom: "var(--space-4)",
-                    paddingBottom: "var(--space-3)",
-                    gap: "var(--space-3)",
-                  }}
+                  className="font-serif text-primary"
+                  style={{ fontSize: "var(--text-h4)", lineHeight: 1.1 }}
                 >
-                  <span
-                    className="font-serif text-primary"
-                    style={{ fontSize: "var(--text-h4)", lineHeight: 1.2 }}
-                  >
-                    {a.title}
-                  </span>
-                  <span
-                    className="font-mono text-outline transition-colors group-hover:text-secondary"
-                    style={{ fontSize: "var(--text-overline)" }}
-                  >
-                    {a.number}
-                  </span>
+                  {r.k}
+                </div>
+                <div
+                  className="font-mono uppercase tracking-wider text-on-surface-variant"
+                  style={{ marginTop: 4, fontSize: "var(--text-overline)" }}
+                >
+                  {r.label}
                 </div>
                 <p
-                  className="text-on-surface-variant"
+                  className="text-on-surface"
+                  style={{ marginTop: 6, fontSize: "var(--text-body-sm)", lineHeight: 1.55 }}
+                >
+                  {r.body}
+                </p>
+              </div>
+            ))}
+          </div>
+        </section>
+
+        {/* Lessons from the corpus */}
+        <section className="grid grid-cols-1 md:grid-cols-12" style={{ gap: "var(--space-5)" }}>
+          <div className="md:col-span-2">
+            <p
+              className="font-mono uppercase tracking-widest text-secondary"
+              style={{ fontSize: "var(--text-overline)" }}
+            >
+              From the corpus
+            </p>
+            <p
+              className="font-mono uppercase tracking-widest text-on-surface-variant"
+              style={{ marginTop: 6, fontSize: "var(--text-overline)" }}
+            >
+              two things we found
+            </p>
+          </div>
+          <div
+            className="md:col-span-10 grid grid-cols-1 sm:grid-cols-2 border-t border-outline-variant"
+            style={{ paddingTop: "var(--space-4)", gap: "var(--space-3)" }}
+          >
+            {LESSONS.map((l) => (
+              <div
+                key={l.k}
+                className="border border-outline-variant bg-surface-container-lowest"
+                style={{ paddingInline: "var(--space-4)", paddingBlock: "var(--space-4)" }}
+              >
+                <h3
+                  className="font-serif font-medium text-primary"
+                  style={{ fontSize: "var(--text-h4)", lineHeight: 1.2 }}
+                >
+                  {l.title}
+                </h3>
+                <p
+                  className="text-on-surface"
                   style={{
+                    marginTop: 6,
                     fontSize: "var(--text-body-sm)",
-                    lineHeight: 1.6,
-                    marginBottom: "var(--space-5)",
-                    minHeight: "5em",
+                    lineHeight: 1.55,
                   }}
                 >
-                  {a.body}
+                  {l.body}
                 </p>
-                <div
-                  className="border border-outline-variant bg-surface-container font-mono text-on-surface"
-                  style={{
-                    paddingInline: "var(--space-3)",
-                    paddingBlock: "var(--space-2)",
-                    fontSize: "var(--text-overline)",
-                  }}
-                >
-                  {a.trace}
-                </div>
-              </div>
-            ))}
-          </div>
-        </Chapter>
-
-        {/* Chapter 06 — Citations and groundedness */}
-        <Chapter num="06" title="Citations" italic="every claim has a node id and a URL.">
-          <p className="mb-4">
-            The Drafter cannot publish a sentence without a{" "}
-            <span className="font-mono text-sm text-secondary">[cite:node:X]</span>{" "}
-            token. The Verifier walks each cited claim back to its source text
-            unit and rejects any sentence whose substring overlap with the cited
-            HTML is below threshold. Refusal is engineered, not measured.
-          </p>
-          <p>
-            Pattern lifted from Self-RAG (Asai et al., ICLR 2024 oral). Our
-            prompt-engineered version of their trained reflection tokens.
-            Combined with CRAG's retrieval evaluator (Yan et al., arXiv:2401.15884)
-            which scores results as Correct / Incorrect / Ambiguous; on Ambiguous
-            we fall back to live SPARQL against{" "}
-            <span className="font-mono text-sm">data.finlex.fi/sparql</span> for
-            government-grade ground truth.
-          </p>
-        </Chapter>
-
-        {/* Chapter 07 — Cost */}
-        <Chapter num="07" title="Cost economics" italic="same architecture, two regimes.">
-          <div className="grid grid-cols-2 gap-6 sm:grid-cols-4">
-            {[
-              ["€0.005", "Local", "Gemma 3 27B on Ollama, electricity dominant."],
-              ["€0.045", "Hosted", "Sonnet drafter on managed inference. 20× under cap."],
-              ["€0.20", "Baseline", "Today's stuffed top-k RAG. We send less context."],
-              ["€1.00", "Brief cap", "RAGTAG lands 22–200× under it."],
-            ].map(([n, label, body]) => (
-              <div
-                key={label}
-                className="border border-outline-variant bg-surface-container-lowest p-5"
-              >
-                <div className="font-serif text-3xl font-medium text-primary">{n}</div>
-                <div className="mt-1 font-mono text-xs uppercase tracking-wider text-on-surface-variant">
-                  {label}
-                </div>
                 <p
-                  className="mt-3 text-on-surface-variant"
-                  style={{ fontSize: 14, lineHeight: 1.55 }}
+                  className="font-mono uppercase tracking-widest text-on-surface-variant"
+                  style={{ marginTop: 10, fontSize: "var(--text-overline)" }}
                 >
-                  {body}
+                  source · {l.source}
                 </p>
               </div>
             ))}
           </div>
-        </Chapter>
+        </section>
 
-        {/* Research */}
+        {/* References */}
         <section className="grid grid-cols-1 md:grid-cols-12" style={{ gap: "var(--space-5)" }}>
           <div className="md:col-span-2">
             <p
@@ -389,156 +496,274 @@ export default function MethodologyPage() {
               References
             </p>
           </div>
-          <div className="border-t border-outline-variant md:col-span-10" style={{ paddingTop: "var(--space-4)" }}>
-            <h2
-              className="font-serif font-medium text-primary"
-              style={{
-                maxWidth: "30ch",
-                marginBottom: "var(--space-6)",
-                fontSize: "clamp(28px, 3.2vw, 40px)",
-                lineHeight: 1.12,
-                letterSpacing: "-0.02em",
-              }}
-            >
-              Everything we built on,{" "}
-              <span className="italic text-on-surface-variant">cited in one place.</span>
-            </h2>
+          <div
+            className="border-t border-outline-variant md:col-span-10"
+            style={{ paddingTop: "var(--space-4)" }}
+          >
             <ul
               className="grid grid-cols-1 sm:grid-cols-2"
-              style={{ columnGap: "var(--space-7)", rowGap: "var(--space-5)" }}
+              style={{ columnGap: "var(--space-5)", rowGap: "var(--space-3)" }}
             >
               {RESEARCH.map(([title, authors, ref]) => (
                 <li
                   key={title}
                   className="flex flex-col border-l-2 border-outline-variant pl-3"
-                  style={{ gap: 2 }}
                 >
                   <span
                     className="font-sans font-medium text-on-surface"
-                    style={{ fontSize: "var(--text-body)" }}
-                  >
-                    {title}
-                  </span>
-                  <span
-                    className="font-sans text-on-surface-variant"
                     style={{ fontSize: "var(--text-body-sm)" }}
                   >
-                    {authors}
+                    {title}
                   </span>
                   <span
                     className="font-mono text-on-surface-variant"
                     style={{ fontSize: "var(--text-overline)" }}
                   >
-                    {ref}
+                    {authors} · {ref}
                   </span>
                 </li>
               ))}
             </ul>
           </div>
         </section>
+
+        {/* CTA */}
+        <section className="grid grid-cols-1 md:grid-cols-12" style={{ gap: "var(--space-5)" }}>
+          <div className="md:col-span-2" />
+          <a
+            href="https://ragtag-timeline.vercel.app"
+            target="_blank"
+            rel="noopener"
+            className="md:col-span-10 group block border border-outline-variant bg-surface-container-lowest transition-colors hover:bg-surface-container-low"
+            style={{ paddingInline: "var(--space-5)", paddingBlock: "var(--space-4)" }}
+          >
+            <p
+              className="font-mono uppercase tracking-widest text-secondary"
+              style={{ fontSize: "var(--text-overline)" }}
+            >
+              Timeline · phone-friendly
+            </p>
+            <p
+              className="text-on-surface"
+              style={{ marginTop: "var(--space-2)", fontSize: "var(--text-body)" }}
+            >
+              The same story as a two-minute scroll on your phone.{" "}
+              <span className="font-mono text-secondary underline">
+                ragtag-timeline.vercel.app
+              </span>
+            </p>
+          </a>
+        </section>
       </div>
     </main>
   );
 }
 
-/* ───────────────────────────────────────────────────────────────────────── */
+/* ─────────────────────────────────────────────────────────────────
+ * Primitives
+ * ──────────────────────────────────────────────────────────────── */
 
-function Chapter({
-  num,
+function PartHeader({
+  part,
   title,
   italic,
-  children,
   insightMarker,
 }: {
-  num: string;
-  title: string;
+  part: string;
+  title: React.ReactNode;
   italic: string;
-  children: React.ReactNode;
   insightMarker?: boolean;
 }) {
   return (
-    <section className="relative grid grid-cols-1 md:grid-cols-12" style={{ gap: "var(--space-5)" }}>
+    <section className="grid grid-cols-1 md:grid-cols-12" style={{ gap: "var(--space-5)" }}>
       <div className="md:col-span-2">
-        <div
-          className="font-serif font-medium text-on-surface-variant/35"
-          style={{
-            fontSize: "clamp(48px, 4.6vw, 80px)",
-            lineHeight: 1,
-            letterSpacing: "-0.04em",
-          }}
+        <p
+          className="font-mono uppercase tracking-widest text-secondary"
+          style={{ fontSize: "var(--text-overline)" }}
         >
-          {num}
-        </div>
+          {part}
+        </p>
       </div>
       <div
         className={
-          "border-t border-outline-variant md:col-span-10 " +
+          "md:col-span-10 border-t-2 border-primary " +
           (insightMarker ? "insight-marker" : "")
         }
-        style={{ paddingTop: "var(--space-4)" }}
+        style={{ paddingTop: "var(--space-3)" }}
       >
         <h2
           className="font-serif font-medium text-primary"
           style={{
-            maxWidth: "30ch",
-            marginBottom: "var(--space-5)",
-            fontSize: "clamp(28px, 3.2vw, 40px)",
-            lineHeight: 1.12,
+            fontSize: "clamp(24px, 3vw, 36px)",
+            lineHeight: 1.1,
             letterSpacing: "-0.02em",
           }}
         >
-          {title}
-          <span className="italic text-on-surface-variant">
-            {" / "}
-            {italic}
-          </span>
+          {title}{" "}
+          {italic ? (
+            <span className="italic text-on-surface-variant">{italic}</span>
+          ) : null}
         </h2>
-        <div className="prose-body">{children}</div>
       </div>
     </section>
   );
 }
 
-/** Mini diagram of the LRMoo node classes used inside Chapter 01. */
-function ArchSchema() {
-  const NODES = [
-    { kind: "Work", desc: "Statute as an abstract concept (AVL)" },
-    { kind: "Expression", desc: "Versioned text at a date" },
-    { kind: "Component", desc: "Section (§) as a concept" },
-    { kind: "CTV", desc: "Component Temporal Version" },
-    { kind: "Action", desc: "Amendment event (first-class)" },
-    { kind: "Case", desc: "KHO / KKO ruling" },
-    { kind: "Guidance", desc: "Vero ohje / kannanotto" },
-    { kind: "Concept", desc: "Domain term (skos:Concept)" },
-  ];
+function SourceChips({ items }: { items: string[] }) {
   return (
-    <div
-      className="grid grid-cols-2 sm:grid-cols-4"
-      style={{ gap: 1, background: "var(--color-outline-variant)", border: "1px solid var(--color-outline-variant)" }}
+    <ul
+      className="flex flex-wrap"
+      style={{ gap: "var(--space-2)", marginTop: "var(--space-3)" }}
     >
-      {NODES.map((n) => (
-        <div
-          key={n.kind}
-          className="bg-surface-container-lowest"
+      {items.map((c) => (
+        <li
+          key={c}
+          className="border border-outline-variant bg-surface-container-lowest font-mono uppercase tracking-wider text-on-surface-variant"
           style={{
-            paddingInline: "var(--space-5)",
-            paddingBlock: "var(--space-4)",
+            paddingInline: "var(--space-2)",
+            paddingBlock: 2,
+            fontSize: "var(--text-overline)",
+            letterSpacing: "0.06em",
           }}
         >
-          <div
-            className="font-mono uppercase tracking-wider text-secondary"
-            style={{ fontSize: "var(--text-overline)" }}
-          >
-            {n.kind}
-          </div>
-          <div
-            className="text-on-surface-variant"
-            style={{ marginTop: 6, fontSize: "var(--text-body-sm)", lineHeight: 1.5 }}
-          >
-            {n.desc}
-          </div>
-        </div>
+          {c}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+function ChatTagRow({ tags, label }: { tags: string[]; label: string }) {
+  return (
+    <div
+      className="flex flex-wrap items-center"
+      style={{ gap: "var(--space-2)", marginTop: "var(--space-2)" }}
+    >
+      <span
+        className="font-mono uppercase tracking-widest text-on-surface-variant"
+        style={{ fontSize: "var(--text-overline)" }}
+      >
+        {label}
+      </span>
+      {tags.map((n) => (
+        <span
+          key={n}
+          className="font-mono text-on-secondary bg-secondary"
+          style={{
+            paddingInline: 6,
+            paddingBlock: 2,
+            fontSize: "var(--text-overline)",
+            letterSpacing: "0.08em",
+          }}
+        >
+          #{n}
+        </span>
       ))}
     </div>
+  );
+}
+
+function ExploredChapter({ card }: { card: ExploredCard }) {
+  return (
+    <section className="grid grid-cols-1 md:grid-cols-12" style={{ gap: "var(--space-5)" }}>
+      <div className="md:col-span-2">
+        <div
+          className="font-serif font-medium text-on-surface-variant/35"
+          style={{
+            fontSize: "clamp(32px, 3.4vw, 56px)",
+            lineHeight: 1,
+            letterSpacing: "-0.04em",
+          }}
+        >
+          {card.number}
+        </div>
+      </div>
+      <div
+        className="border-t border-outline-variant md:col-span-10"
+        style={{ paddingTop: "var(--space-3)" }}
+      >
+        <h3
+          className="font-serif font-medium text-primary"
+          style={{
+            marginBottom: 6,
+            fontSize: "clamp(20px, 2.4vw, 26px)",
+            lineHeight: 1.15,
+            letterSpacing: "-0.015em",
+          }}
+        >
+          {card.title}{" "}
+          <span className="italic text-on-surface-variant">{card.italic}</span>
+        </h3>
+        <p
+          className="text-on-surface"
+          style={{ maxWidth: "60ch", fontSize: "var(--text-body)", lineHeight: 1.5 }}
+        >
+          {card.body}
+        </p>
+        <SourceChips items={card.sources} />
+        <ChatTagRow tags={card.killedBy} label="Killed by" />
+        <p
+          className="text-on-surface-variant"
+          style={{
+            marginTop: "var(--space-2)",
+            maxWidth: "60ch",
+            fontSize: "var(--text-body-sm)",
+            lineHeight: 1.5,
+          }}
+        >
+          {card.cut}
+        </p>
+      </div>
+    </section>
+  );
+}
+
+function ShippedChapter({ card }: { card: ShippedCard }) {
+  return (
+    <section className="grid grid-cols-1 md:grid-cols-12" style={{ gap: "var(--space-5)" }}>
+      <div className="md:col-span-2">
+        <div
+          className="font-serif font-medium text-primary"
+          style={{
+            fontSize: "clamp(32px, 3.4vw, 56px)",
+            lineHeight: 1,
+            letterSpacing: "-0.04em",
+          }}
+        >
+          {card.number}
+        </div>
+        <p
+          className="font-mono uppercase tracking-widest text-secondary"
+          style={{ marginTop: 6, fontSize: "var(--text-overline)" }}
+        >
+          RAGTAG
+        </p>
+      </div>
+      <div
+        className="border-t border-outline-variant md:col-span-10"
+        style={{ paddingTop: "var(--space-3)" }}
+      >
+        <h3
+          className="font-serif font-medium text-primary"
+          style={{
+            marginBottom: 6,
+            fontSize: "clamp(20px, 2.4vw, 26px)",
+            lineHeight: 1.15,
+            letterSpacing: "-0.015em",
+          }}
+        >
+          {card.title}{" "}
+          <span className="italic text-on-surface-variant">{card.italic}</span>
+        </h3>
+        <p
+          className="text-on-surface"
+          style={{ maxWidth: "60ch", fontSize: "var(--text-body)", lineHeight: 1.5 }}
+        >
+          {card.body}
+        </p>
+        <SourceChips items={card.sources} />
+        <ChatTagRow tags={card.delivers} label="Answers" />
+      </div>
+    </section>
   );
 }
