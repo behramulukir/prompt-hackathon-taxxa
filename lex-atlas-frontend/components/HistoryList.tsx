@@ -69,7 +69,11 @@ export function HistoryList({ entries, onRecall, onRemove, onClear, variant = "i
 
       <ul className="divide-y divide-outline-variant border-y border-outline-variant">
         {entries.map((entry) => (
-          <li key={entry.id}>
+          // Defense in depth: ``entry.id`` SHOULD already be unique after
+          // useQueryHistory's read/push dedupes, but mixing in ``ts``
+          // guarantees React's keyed-list invariant even if a stale
+          // localStorage payload sneaks through.
+          <li key={`${entry.id}-${entry.ts}`}>
             <HistoryRow
               entry={entry}
               variant={variant}

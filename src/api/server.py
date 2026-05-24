@@ -484,6 +484,22 @@ async def _ask_stream(body: AskBody, request: Request) -> AsyncIterator[bytes]:
         "orbitEdges": orbit_edges,
     })
 
+    # Pre-warm the /excerpt cache for every orbit node. The frontend
+    # CitationDrawer aborts the request after 2 s; LanceDB's first cold
+    # scan per chunk can blow that budget. We do them all in one bulk
+    # ``IN (...)`` query, then stuff the rows into the per-id cache so
+    # subsequent /excerpt calls are O(1) dict reads.
+    orbit_chunk_ids = [n["id"] for n in orbit_nodes]
+    if orbit_chunk_ids:
+        t = time.perf_counter()
+        prefetched = await _on_worker(
+            lambda: _prefetch_chunk_rows(pipe, orbit_chunk_ids)
+        )
+        log.info(
+            "excerpt_prefetch · warmed=%d/%d · %d ms",
+            prefetched, len(orbit_chunk_ids), _ms_since(t),
+        )
+
     # Stage 6 — generate.
     t = time.perf_counter()
     try:
@@ -626,7 +642,9 @@ def _lookup_chunk_row(chunk_id: str) -> dict[str, Any] | None:
     if chunk_id in _CHUNK_LOOKUP_BY_ID:
         return _CHUNK_LOOKUP_BY_ID[chunk_id]
     pipe = get_pipeline()
-    store = pipe.vector_store
+    # v1 ``Pipeline`` exposes the LanceDB connection via ``retriever.store``.
+    # (PipelineV2 had a convenience ``vector_store`` alias; v1 doesn't.)
+    store = pipe.retriever.store
     if store.table is None:
         return None
     quoted = chunk_id.replace("'", "''")
@@ -645,6 +663,44 @@ def _lookup_chunk_row(chunk_id: str) -> dict[str, Any] | None:
     if row is not None:
         _CHUNK_LOOKUP_BY_ID[chunk_id] = row
     return row
+
+
+def _prefetch_chunk_rows(pipe: Pipeline, chunk_ids: list[str]) -> int:
+    """Bulk-warm ``_CHUNK_LOOKUP_BY_ID`` for a list of chunk_ids.
+
+    One ``IN (...)`` scan instead of N point lookups. The default frontend
+    timeout on ``/api/excerpt`` is 2 s; one bulk scan against a few-thousand-
+    row prefilter is well under that even cold, and the per-id cache
+    immediately picks up hits from there.
+
+    Returns the number of rows actually written into the cache.
+    """
+    # v1 ``Pipeline`` exposes the LanceDB connection via ``retriever.store``.
+    # (PipelineV2 had a convenience ``vector_store`` alias; v1 doesn't.)
+    store = pipe.retriever.store
+    if store.table is None or not chunk_ids:
+        return 0
+    todo = [cid for cid in chunk_ids if cid not in _CHUNK_LOOKUP_BY_ID]
+    if not todo:
+        return 0
+    quoted = ",".join("'" + cid.replace("'", "''") + "'" for cid in todo)
+    try:
+        arrow = (
+            store.table.search()
+            .where(f"chunk_id IN ({quoted})", prefilter=True)
+            .limit(len(todo) + 8)
+            .to_arrow()
+        )
+    except Exception as e:  # pragma: no cover — defensive
+        logger.warning("lancedb prefetch failed: %s", e)
+        return 0
+    warmed = 0
+    for row in arrow.to_pylist():
+        cid = row.get("chunk_id")
+        if cid and cid not in _CHUNK_LOOKUP_BY_ID:
+            _CHUNK_LOOKUP_BY_ID[cid] = row
+            warmed += 1
+    return warmed
 
 
 def _highlight(body: str) -> str:

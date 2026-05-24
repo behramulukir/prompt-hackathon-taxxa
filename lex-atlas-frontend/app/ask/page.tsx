@@ -49,10 +49,20 @@ const PROMPTS = [
 ];
 
 function genQueryId(): string {
-  const hex = "0123456789ABCDEF";
-  let id = "";
-  for (let i = 0; i < 8; i++) id += hex[Math.floor(Math.random() * 16)];
-  return id.slice(0, 4) + "-" + id.slice(4);
+  // 12 hex chars in three groups (XXXX-XXXX-XXXX). 16^12 ≈ 281 trillion
+  // combos — collisions vanish in practice. Prefers ``crypto.randomUUID``
+  // (CSPRNG) when available; falls back to ``Math.random`` for older
+  // browsers / non-secure contexts.
+  let hex: string;
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    hex = crypto.randomUUID().replace(/-/g, "").toUpperCase();
+  } else {
+    const chars = "0123456789ABCDEF";
+    let s = "";
+    for (let i = 0; i < 12; i++) s += chars[Math.floor(Math.random() * 16)];
+    hex = s;
+  }
+  return `${hex.slice(0, 4)}-${hex.slice(4, 8)}-${hex.slice(8, 12)}`;
 }
 
 function nowHHMM(): string {

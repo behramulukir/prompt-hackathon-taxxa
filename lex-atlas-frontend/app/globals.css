@@ -209,9 +209,20 @@
     text-underline-offset: 4px;
     cursor: help;
     transition: text-decoration-thickness var(--dur-fast) var(--ease-cubic);
+    /* Tiny gap so adjacent anchors don't visually fuse even when the LLM
+       writes `[Source 1][Source 3]` with no whitespace between them. */
+    margin-inline: 0 1px;
   }
   .cite-anchor:hover {
     text-decoration-thickness: 2.5px;
+  }
+  /* The thin "," divider inserted between back-to-back cite anchors. The
+     comma itself is decorative; it stays unstyled by the surrounding
+     anchor's underline so the two anchors read as two separate sources. */
+  .cite-separator {
+    color: var(--color-on-surface-variant);
+    text-decoration: none;
+    user-select: none;
   }
 
   .cite-pill {

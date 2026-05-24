@@ -16,7 +16,26 @@ import { useEffect, useRef, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { useGraphStore } from "@/lib/store";
 import { colorForKind, AUTHORITY_LABELS } from "@/lib/colors";
-import type { ExcerptResponse, OrbitNode, OrbitEdge, EdgeRelation } from "@/lib/types";
+import type { ExcerptResponse, OrbitNode, OrbitEdge, EdgeRelation, NodeKind } from "@/lib/types";
+
+/** Map a NodeKind to a single short label so the rank's "1 / 8 ..." line
+ *  finally says something useful when surfaced under the rank chip.
+ *  AUTHORITY_LABELS keys off the 1-8 bucket only, which conflates
+ *  e.g. "Vero ohje rank 3" with "older statute rank 3". This is kind-
+ *  aware so the sub-line matches what you're actually looking at. */
+const KIND_DESC: Record<NodeKind, string> = {
+  work: "Statute (Finlex)",
+  expression: "Versioned statute text",
+  component: "Statute chapter",
+  ctv: "Statute section",
+  action: "Amendment",
+  case: "Court ruling",
+  guidance: "Tax-authority guidance",
+  concept: "Domain concept",
+  authority: "Issuing body",
+  jurisdiction: "Jurisdiction",
+  theme: "Topic cluster",
+};
 
 const excerptCache = new Map<string, ExcerptResponse>();
 
@@ -133,6 +152,13 @@ export function Inspector() {
                 target={orbitNodes.find((n) => n.id === selectedEdge.target) ?? null}
               />
             )}
+            {/* Selected edge that the store doesn't know about — happens for
+                synthetic "scaffolding" edges OrbitGraph adds to keep the
+                layout connected. Show a clear panel instead of a blank one
+                so the click doesn't feel broken. */}
+            {!selectedNode && !selectedEdge && selectedEdgeKey && (
+              <SyntheticEdgeBody edgeKey={selectedEdgeKey} />
+            )}
           </div>
         </motion.aside>
       )}
@@ -187,12 +213,28 @@ function NodeBody({ node, edges }: { node: OrbitNode; edges: OrbitEdge[] }) {
         </div>
       </div>
 
-      {/* Metadata grid */}
+      {/* Metadata grid. Authority rank's sub-line is now kind-aware, not
+          "Recent amendment" for every rank-6 thing. The Valid-from/until
+          rows are only rendered when the backend actually supplied a date,
+          so blank corpus metadata no longer fakes a temporal window. */}
       <dl className="grid grid-cols-2 gap-3 border-y border-outline-variant py-3">
-        <Metric label="Authority rank" value={`${node.authorityRank} / 8`} sub={AUTHORITY_LABELS[node.authorityRank]} />
-        <Metric label="Active at asof" value={node.isActive ? "Yes" : "No"} accent={node.isActive ? color : undefined} />
-        <Metric label="Valid from" value={node.tValid ?? "--"} />
-        <Metric label="Valid until" value={node.tInvalid ?? (node.tValid ? "present" : "--")} />
+        <Metric
+          label="Authority rank"
+          value={`${node.authorityRank} / 8`}
+          sub={KIND_DESC[node.kind] ?? AUTHORITY_LABELS[node.authorityRank]}
+        />
+        <Metric
+          label="Active at asof"
+          value={node.isActive ? "Yes" : "No"}
+          accent={node.isActive ? color : undefined}
+        />
+        {node.tValid && <Metric label="Valid from" value={node.tValid} />}
+        {(node.tInvalid || node.tValid) && (
+          <Metric
+            label="Valid until"
+            value={node.tInvalid ?? "present"}
+          />
+        )}
       </dl>
 
       {/* Incident edges */}
@@ -225,6 +267,37 @@ function NodeBody({ node, edges }: { node: OrbitNode; edges: OrbitEdge[] }) {
     </div>
   );
 }
+
+function SyntheticEdgeBody({ edgeKey }: { edgeKey: string }) {
+  const [src, tgt] = edgeKey.split("->");
+  return (
+    <div className="space-y-4">
+      <div>
+        <div className="font-mono text-[11px] uppercase tracking-wider text-on-surface-variant">
+          Layout edge
+        </div>
+        <h2
+          className="mt-1 font-serif font-medium leading-tight"
+          style={{ fontSize: 20 }}
+        >
+          {src ?? "?"}{" "}
+          <span className="text-on-surface-variant">--scaffolding--&gt;</span>{" "}
+          {tgt ?? "?"}
+        </h2>
+      </div>
+      <p
+        className="border-l-2 border-outline-variant pl-3 text-on-surface-variant"
+        style={{ fontSize: 14, lineHeight: 1.55 }}
+      >
+        This line is rendered by the orbit layout to keep the graph
+        connected, but there's no typed graph relation behind it. Click a
+        solid edge (one with a relation label like <code>cites</code> or
+        <code> interprets</code>) to see real edge metadata.
+      </p>
+    </div>
+  );
+}
+
 
 function EdgeBody({
   edge,
@@ -452,6 +525,104 @@ function NodeExcerpt({ nodeId }: { nodeId: string }) {
         className="font-sans text-on-surface [&_mark.claim-match]:rounded-sm [&_mark.claim-match]:bg-secondary/20 [&_mark.claim-match]:px-0.5"
         style={{ fontSize: 14, lineHeight: 1.6 }}
         dangerouslySetInnerHTML={{ __html: excerpt.excerptHtml }}
+      />
+      <SourceFrame url={excerpt.sourceUrl} />
+    </div>
+  );
+}
+
+/** Toggleable inline iframe of the source page.
+ *
+ *  Finlex and Vero don't always allow embedding (X-Frame-Options /
+ *  Content-Security-Policy: frame-ancestors). We can't reliably detect
+ *  that from cross-origin JS — ``onload`` still fires for blocked frames.
+ *  Strategy: open the iframe optimistically with sandbox attributes; if
+ *  the load takes longer than 4 s we assume it was blocked and show a
+ *  fallback link. Either way, the "open ↗" button above still works. */
+function SourceFrame({ url }: { url: string }) {
+  const [open, setOpen] = useState(false);
+  const [loaded, setLoaded] = useState(false);
+  const [stalled, setStalled] = useState(false);
+  const stallRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    setLoaded(false);
+    setStalled(false);
+    stallRef.current = window.setTimeout(() => setStalled(true), 4000);
+    return () => {
+      if (stallRef.current) window.clearTimeout(stallRef.current);
+    };
+  }, [open, url]);
+
+  if (!open) {
+    return (
+      <button
+        type="button"
+        onClick={() => setOpen(true)}
+        className="flex items-center gap-2 border border-outline-variant px-3 py-1.5 font-mono text-xs uppercase tracking-wider text-on-surface-variant transition hover:bg-surface-container hover:text-on-surface"
+      >
+        <span className="material-symbols-outlined" style={{ fontSize: 14 }}>
+          open_in_full
+        </span>
+        Open page inline
+      </button>
+    );
+  }
+
+  return (
+    <div className="space-y-2 border border-outline-variant bg-surface-container-low p-2">
+      <div className="flex items-center justify-between gap-2">
+        <span className="font-mono text-[10px] uppercase tracking-wider text-on-surface-variant">
+          {loaded ? "page embedded" : stalled ? "embedding blocked" : "loading source…"}
+        </span>
+        <button
+          type="button"
+          onClick={() => setOpen(false)}
+          className="font-mono text-[10px] uppercase tracking-wider text-on-surface-variant hover:text-on-surface"
+          aria-label="Close inline source"
+        >
+          close
+        </button>
+      </div>
+      {stalled && !loaded && (
+        <div className="border border-outline-variant bg-surface-container-lowest p-3">
+          <p
+            className="font-sans text-on-surface-variant"
+            style={{ fontSize: 13, lineHeight: 1.55 }}
+          >
+            This page didn't load inside the frame within 4 seconds — the
+            publisher likely blocks embedding via{" "}
+            <code>X-Frame-Options</code>. Use the link below to open it in a
+            new tab.
+          </p>
+          <a
+            href={url}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="mt-2 inline-flex items-center gap-1 font-mono text-xs text-secondary hover:underline"
+          >
+            {url}
+            <span className="material-symbols-outlined" style={{ fontSize: 14 }}>
+              open_in_new
+            </span>
+          </a>
+        </div>
+      )}
+      <iframe
+        src={url}
+        title="Source page"
+        sandbox="allow-same-origin allow-scripts allow-popups allow-forms"
+        referrerPolicy="no-referrer"
+        loading="lazy"
+        onLoad={() => setLoaded(true)}
+        style={{
+          width: "100%",
+          height: stalled && !loaded ? 0 : 480,
+          border: "1px solid var(--color-outline-variant)",
+          background: "var(--color-surface)",
+          display: stalled && !loaded ? "none" : "block",
+        }}
       />
     </div>
   );

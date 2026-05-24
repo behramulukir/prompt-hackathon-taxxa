@@ -304,10 +304,31 @@ function renderAnswer(
   let lastIdx = 0;
   let m: RegExpExecArray | null;
   let counter = 0;
+  let prevWasCite = false;
   const re = new RegExp(CITE_TOKEN_RE.source, "g");
   while ((m = re.exec(cleaned)) !== null) {
     const [full, nodeId, label] = m;
-    if (m.index > lastIdx) parts.push(cleaned.slice(lastIdx, m.index));
+    // Plain text between this match and the previous one.
+    if (m.index > lastIdx) {
+      const between = cleaned.slice(lastIdx, m.index);
+      parts.push(...renderMarkdownInline(between, `t-${counter}`));
+      // ``prevWasCite`` only stays true when there was no visible text
+      // between two cite tokens — that's the case we need to separate.
+      prevWasCite = false;
+    }
+    // Two cite tokens back-to-back with nothing between → inject a thin
+    // separator so the underlines don't merge into one long blob.
+    if (prevWasCite) {
+      parts.push(
+        <span
+          key={`sep-${counter}`}
+          className="cite-separator"
+          aria-hidden
+        >
+          ,{" "}
+        </span>
+      );
+    }
     const kind = nodeKind[nodeId] ?? "work";
     const color = colorForKind(kind);
     parts.push(
@@ -322,9 +343,78 @@ function renderAnswer(
       </CiteAnchor>
     );
     lastIdx = m.index + full.length;
+    prevWasCite = true;
   }
-  if (lastIdx < cleaned.length) parts.push(cleaned.slice(lastIdx));
+  if (lastIdx < cleaned.length) {
+    parts.push(...renderMarkdownInline(cleaned.slice(lastIdx), `t-tail`));
+  }
   return parts;
+}
+
+// Minimal inline markdown: **bold**, *italic*, _italic_. Anything else
+// (lists, headers, code blocks) passes through as plain text — the
+// agent's answers don't use them and we don't want to invite XSS via
+// dangerouslySetInnerHTML.
+const _BOLD_RE = /\*\*([^*\n]+?)\*\*/;
+const _ITAL_STAR_RE = /(?:^|[^*])\*([^*\n]+?)\*(?!\*)/;
+const _ITAL_UNDER_RE = /(?:^|[^_\w])_([^_\n]+?)_(?!_)/;
+
+function renderMarkdownInline(
+  text: string,
+  keyPrefix: string
+): React.ReactNode[] {
+  if (!text) return [];
+  const out: React.ReactNode[] = [];
+  let remaining = text;
+  let i = 0;
+  // Loop: at each step find the EARLIEST of {bold, italic-star, italic-under},
+  // emit the leading plain text + the styled span, then continue with the rest.
+  while (remaining.length > 0) {
+    type Match = { kind: "b" | "i"; full: string; inner: string; idx: number };
+    const candidates: Match[] = [];
+    const mb = _BOLD_RE.exec(remaining);
+    if (mb) candidates.push({ kind: "b", full: mb[0], inner: mb[1], idx: mb.index });
+    const mis = _ITAL_STAR_RE.exec(remaining);
+    if (mis) {
+      // Capture group 1 sits one char inside ``full`` when the lookbehind
+      // matched a non-* character; align ``idx`` to the literal ``*``.
+      const starIdx = remaining.indexOf("*", mis.index);
+      candidates.push({
+        kind: "i",
+        full: `*${mis[1]}*`,
+        inner: mis[1],
+        idx: starIdx,
+      });
+    }
+    const miu = _ITAL_UNDER_RE.exec(remaining);
+    if (miu) {
+      const underIdx = remaining.indexOf("_", miu.index);
+      candidates.push({
+        kind: "i",
+        full: `_${miu[1]}_`,
+        inner: miu[1],
+        idx: underIdx,
+      });
+    }
+    if (candidates.length === 0) {
+      out.push(remaining);
+      break;
+    }
+    candidates.sort((a, b) => a.idx - b.idx);
+    const winner = candidates[0];
+    if (winner.idx > 0) out.push(remaining.slice(0, winner.idx));
+    const tag = winner.kind === "b" ? "strong" : "em";
+    out.push(
+      tag === "strong" ? (
+        <strong key={`${keyPrefix}-md-${i}`}>{winner.inner}</strong>
+      ) : (
+        <em key={`${keyPrefix}-md-${i}`}>{winner.inner}</em>
+      )
+    );
+    remaining = remaining.slice(winner.idx + winner.full.length);
+    i += 1;
+  }
+  return out;
 }
 
 function CiteAnchor({
