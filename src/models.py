@@ -112,7 +112,17 @@ EdgeType = Literal[
     "amends_section",
 ]
 
-ExtractionMethod = Literal["structural", "anchor", "regex", "llm"]
+ExtractionMethod = Literal[
+    "structural",
+    "anchor",
+    "regex",
+    "llm",
+    # Step-10 backfills — slug-inferred edges from `…muuttamisesta` LAW
+    # roots into the consolidated target they amend. See
+    # scripts/backfill_muuttamisesta_edges.py.
+    "backfill_amendment",
+    "backfill_muuttamisesta",
+]
 
 DanglingReason = Literal[
     "out_of_corpus",

@@ -101,6 +101,18 @@ def _is_year(num: str) -> bool:
     return 1900 <= int(num) <= 2099
 
 
+def _group_thousands(int_str: str) -> str:
+    """Format an integer string with comma thousand separators ("30000" -> "30,000")."""
+    if not int_str.isdigit() or len(int_str) <= 3:
+        return int_str
+    out = []
+    for i, ch in enumerate(reversed(int_str)):
+        if i and i % 3 == 0:
+            out.append(",")
+        out.append(ch)
+    return "".join(reversed(out))
+
+
 def _extract_numbers(text: str) -> list[str]:
     return [_normalize_number(m.group(1)) for m in _NUMBER_RE.finditer(text or "")]
 
@@ -282,7 +294,10 @@ def grade_deterministic(row: dict[str, Any], resolver: ChunkResolver) -> dict[st
     )
 
     # Hallucinated numbers: appear in answer but not in any retrieved chunk's
-    # embedded_text. Also accept the comma-decimal form ("30,5" <-> "30.5").
+    # embedded_text. Also accept the comma-decimal form ("30,5" <-> "30.5"),
+    # and Finnish thousand-separator forms ("30000" <-> "30 000" / "30 000"
+    # with NBSP / "30.000"). Finnish administrative prose almost always
+    # writes thresholds with spaces.
     retrieved_text_blob = "\n".join(
         (resolver.get(cid) or {}).get("embedded_text") or "" for cid in retrieved
     )
@@ -294,6 +309,18 @@ def grade_deterministic(row: dict[str, Any], resolver: ChunkResolver) -> dict[st
             continue
         if "." in n and n.replace(".", ",") in retrieved_text_blob:
             continue
+        # Try thousand-separated forms for integer numbers ≥ 1000.
+        if "." not in n and "," not in n and len(n) >= 4 and n.isdigit():
+            int_part, frac = n, ""
+            grouped = _group_thousands(int_part)
+            variants = [
+                grouped.replace(",", " "),       # 30 000
+                grouped.replace(",", " "),   # 30\xa0000 (NBSP)
+                grouped.replace(",", "."),        # 30.000 (Finnish typography)
+                grouped,                          # 30,000 (English)
+            ]
+            if any(v in retrieved_text_blob for v in variants):
+                continue
         hallucinated.append(n)
     hallucinated = hallucinated[:20]
 

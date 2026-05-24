@@ -108,6 +108,13 @@ export default function AskPage() {
   const phase = useGraphStore((s) => s.phase);
   const walkedCount = useGraphStore((s) => s.walkedCount);
 
+  // Zustand store outlives route changes; the local `turns` does not. Without
+  // this, navigating away (e.g. via the header title) and back leaves the
+  // previous turn's orbit hanging in the right rail with no thread to anchor it.
+  useEffect(() => {
+    reset();
+  }, [reset]);
+
   // Latest turn — the one currently streaming (or last completed).
   const activeTurn = turns.length > 0 ? turns[turns.length - 1] : null;
   const isStreaming = activeTurn ? !activeTurn.done : false;

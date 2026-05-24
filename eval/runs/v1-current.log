@@ -1,0 +1,120 @@
+plan: configs=['v1-current'] questions=83 dry_run=False
+[v1-current] 82 to run (1 already in v1-current.jsonl); pipeline=v1 rerank=metadata query_rewrite=True hybrid=True
+query_rewrite: LLM call failed (Error code: 429 - {'error': {'message': 'Concurrency limit exceeded. Your account details:\n\n**Current Usage:**\n- Active concurrent requests: 4 units\n- This request requires: 4 units\n- Total needed: 8 units\n- Your plan limit: 4 units\n- Over limit by: 4 units\n\n**Model Details:**\n- Model: deepseek-ai/DeepSeek-V4-Pro\n- Model class: deepseek4-1.6t\n- Model concurrency cost: 4 units per request\n\n**Account Details:**\n- Organization: org_ArwgwxmGQdRFW64mEpgga\n- Plan: feather_pro_plus\n- Plan concurrency limit: 4\n- Subscription quantity: 1\n- Effective limit: 4 units\n\nPlease upgrade your plan to increase your concurrency limit or wait for current requests to complete.', 'type': 'invalid_request_error', 'param': None, 'code': 'concurrency_limit_exceeded'}}) — using original
+[v1-current] Q3 (basic) ... 20.7s | cited 2 | timing: retrieve=1365 generate=16593
+Traceback (most recent call last):
+  File "/Users/ilya.nekrasov/development/prompt-hackathon-taxxa/scripts/run_eval.py", line 198, in _run_one_config
+    result = _call_answer(pipe, config, question)
+  File "/Users/ilya.nekrasov/development/prompt-hackathon-taxxa/scripts/run_eval.py", line 146, in _call_answer
+    return pipe.answer(question, k=int(config.get("k", 20)), n=n)
+           ~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/ilya.nekrasov/development/prompt-hackathon-taxxa/src/retrieval/pipeline.py", line 132, in answer
+    context: AssembledContext = assemble(
+                                ~~~~~~~~^
+        reranked, graph=self.graph, n=n, as_of=as_of
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/Users/ilya.nekrasov/development/prompt-hackathon-taxxa/src/retrieval/assemble.py", line 488, in assemble
+    edge_lines = _render_edges_for_source(
+        hit.section_id, section_id_to_index, graph
+    )
+  File "/Users/ilya.nekrasov/development/prompt-hackathon-taxxa/src/retrieval/assemble.py", line 358, in _render_edges_for_source
+    neighbors: list[Neighbor] = graph.get_neighbors(
+                                ~~~~~~~~~~~~~~~~~~~^
+        section_id,
+        ^^^^^^^^^^^
+        edge_types=list(RENDERED_EDGE_TYPES),
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        direction="both",
+        ^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/Users/ilya.nekrasov/development/prompt-hackathon-taxxa/src/indexing/graph_store.py", line 154, in get_neighbors
+    Neighbor(node_id=nbr_id, edge=_row_to_edge(row), direction=dir_followed)
+                                  ~~~~~~~~~~~~^^^^^
+  File "/Users/ilya.nekrasov/development/prompt-hackathon-taxxa/src/indexing/graph_store.py", line 66, in _row_to_edge
+    return Edge(
+        source_id=row["source_id"],
+    ...<7 lines>...
+        properties=props,
+    )
+  File "/Users/ilya.nekrasov/development/prompt-hackathon-taxxa/.venv/lib/python3.13/site-packages/pydantic/main.py", line 263, in __init__
+    validated_self = self.__pydantic_validator__.validate_python(data, self_instance=self)
+pydantic_core._pydantic_core.ValidationError: 1 validation error for Edge
+extracted_by
+  Input should be 'structural', 'anchor', 'regex' or 'llm' [type=literal_error, input_value='backfill_amendment', input_type=str]
+    For further information visit https://errors.pydantic.dev/2.13/v/literal_error
+[v1-current] Q4 (basic) ... 11.0s | ERROR: ValidationError: 1 validation error for Edge
+extracted_by
+  Input should be 'structural', 'anchor', 'regex' or 'llm' [ty
+query_rewrite: LLM call failed (Error code: 429 - {'error': {'message': 'Concurrency limit exceeded. Your account details:\n\n**Current Usage:**\n- Active concurrent requests: 4 units\n- This request requires: 4 units\n- Total needed: 8 units\n- Your plan limit: 4 units\n- Over limit by: 4 units\n\n**Model Details:**\n- Model: deepseek-ai/DeepSeek-V4-Pro\n- Model class: deepseek4-1.6t\n- Model concurrency cost: 4 units per request\n\n**Account Details:**\n- Organization: org_ArwgwxmGQdRFW64mEpgga\n- Plan: feather_pro_plus\n- Plan concurrency limit: 4\n- Subscription quantity: 1\n- Effective limit: 4 units\n\nPlease upgrade your plan to increase your concurrency limit or wait for current requests to complete.', 'type': 'invalid_request_error', 'param': None, 'code': 'concurrency_limit_exceeded'}}) — using original
+Traceback (most recent call last):
+  File "/Users/ilya.nekrasov/development/prompt-hackathon-taxxa/scripts/run_eval.py", line 198, in _run_one_config
+    result = _call_answer(pipe, config, question)
+  File "/Users/ilya.nekrasov/development/prompt-hackathon-taxxa/scripts/run_eval.py", line 146, in _call_answer
+    return pipe.answer(question, k=int(config.get("k", 20)), n=n)
+           ~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/ilya.nekrasov/development/prompt-hackathon-taxxa/src/retrieval/pipeline.py", line 139, in answer
+    gen: Generation = generate(question, context)
+                      ~~~~~~~~^^^^^^^^^^^^^^^^^^^
+  File "/Users/ilya.nekrasov/development/prompt-hackathon-taxxa/src/retrieval/generate.py", line 271, in generate
+    resp = client.chat.completions.create(
+        model=model,
+    ...<2 lines>...
+        messages=messages,
+    )
+  File "/Users/ilya.nekrasov/development/prompt-hackathon-taxxa/.venv/lib/python3.13/site-packages/openai/_utils/_utils.py", line 298, in wrapper
+    return func(*args, **kwargs)
+  File "/Users/ilya.nekrasov/development/prompt-hackathon-taxxa/.venv/lib/python3.13/site-packages/openai/resources/chat/completions/completions.py", line 1215, in create
+    return self._post(
+           ~~~~~~~~~~^
+        "/chat/completions",
+        ^^^^^^^^^^^^^^^^^^^^
+    ...<51 lines>...
+        stream_cls=Stream[ChatCompletionChunk],
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/Users/ilya.nekrasov/development/prompt-hackathon-taxxa/.venv/lib/python3.13/site-packages/openai/_base_client.py", line 1332, in post
+    return cast(ResponseT, self.request(cast_to, opts, stream=stream, stream_cls=stream_cls))
+                           ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/ilya.nekrasov/development/prompt-hackathon-taxxa/.venv/lib/python3.13/site-packages/openai/_base_client.py", line 1105, in request
+    raise self._make_status_error_from_response(err.response) from None
+openai.RateLimitError: Error code: 429 - {'error': {'message': 'Concurrency limit exceeded. Your account details:\n\n**Current Usage:**\n- Active concurrent requests: 4 units\n- This request requires: 4 units\n- Total needed: 8 units\n- Your plan limit: 4 units\n- Over limit by: 4 units\n\n**Model Details:**\n- Model: deepseek-ai/DeepSeek-V4-Pro\n- Model class: deepseek4-1.6t\n- Model concurrency cost: 4 units per request\n\n**Account Details:**\n- Organization: org_ArwgwxmGQdRFW64mEpgga\n- Plan: feather_pro_plus\n- Plan concurrency limit: 4\n- Subscription quantity: 1\n- Effective limit: 4 units\n\nPlease upgrade your plan to increase your concurrency limit or wait for current requests to complete.', 'type': 'invalid_request_error', 'param': None, 'code': 'concurrency_limit_exceeded'}}
+[v1-current] Q6 (basic) ... 14.7s | ERROR: RateLimitError: Error code: 429 - {'error': {'message': 'Concurrency limit exceeded. Your account details:\n\n**Current 
+query_rewrite: LLM call failed (Error code: 429 - {'error': {'message': 'Concurrency limit exceeded. Your account details:\n\n**Current Usage:**\n- Active concurrent requests: 4 units\n- This request requires: 4 units\n- Total needed: 8 units\n- Your plan limit: 4 units\n- Over limit by: 4 units\n\n**Model Details:**\n- Model: deepseek-ai/DeepSeek-V4-Pro\n- Model class: deepseek4-1.6t\n- Model concurrency cost: 4 units per request\n\n**Account Details:**\n- Organization: org_ArwgwxmGQdRFW64mEpgga\n- Plan: feather_pro_plus\n- Plan concurrency limit: 4\n- Subscription quantity: 1\n- Effective limit: 4 units\n\nPlease upgrade your plan to increase your concurrency limit or wait for current requests to complete.', 'type': 'invalid_request_error', 'param': None, 'code': 'concurrency_limit_exceeded'}}) — using original
+Traceback (most recent call last):
+  File "/Users/ilya.nekrasov/development/prompt-hackathon-taxxa/scripts/run_eval.py", line 198, in _run_one_config
+    result = _call_answer(pipe, config, question)
+  File "/Users/ilya.nekrasov/development/prompt-hackathon-taxxa/scripts/run_eval.py", line 146, in _call_answer
+    return pipe.answer(question, k=int(config.get("k", 20)), n=n)
+           ~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/ilya.nekrasov/development/prompt-hackathon-taxxa/src/retrieval/pipeline.py", line 139, in answer
+    gen: Generation = generate(question, context)
+                      ~~~~~~~~^^^^^^^^^^^^^^^^^^^
+  File "/Users/ilya.nekrasov/development/prompt-hackathon-taxxa/src/retrieval/generate.py", line 271, in generate
+    resp = client.chat.completions.create(
+        model=model,
+    ...<2 lines>...
+        messages=messages,
+    )
+  File "/Users/ilya.nekrasov/development/prompt-hackathon-taxxa/.venv/lib/python3.13/site-packages/openai/_utils/_utils.py", line 298, in wrapper
+    return func(*args, **kwargs)
+  File "/Users/ilya.nekrasov/development/prompt-hackathon-taxxa/.venv/lib/python3.13/site-packages/openai/resources/chat/completions/completions.py", line 1215, in create
+    return self._post(
+           ~~~~~~~~~~^
+        "/chat/completions",
+        ^^^^^^^^^^^^^^^^^^^^
+    ...<51 lines>...
+        stream_cls=Stream[ChatCompletionChunk],
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/Users/ilya.nekrasov/development/prompt-hackathon-taxxa/.venv/lib/python3.13/site-packages/openai/_base_client.py", line 1332, in post
+    return cast(ResponseT, self.request(cast_to, opts, stream=stream, stream_cls=stream_cls))
+                           ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/ilya.nekrasov/development/prompt-hackathon-taxxa/.venv/lib/python3.13/site-packages/openai/_base_client.py", line 1105, in request
+    raise self._make_status_error_from_response(err.response) from None
+openai.RateLimitError: Error code: 429 - {'error': {'message': 'Concurrency limit exceeded. Your account details:\n\n**Current Usage:**\n- Active concurrent requests: 4 units\n- This request requires: 4 units\n- Total needed: 8 units\n- Your plan limit: 4 units\n- Over limit by: 4 units\n\n**Model Details:**\n- Model: deepseek-ai/DeepSeek-V4-Pro\n- Model class: deepseek4-1.6t\n- Model concurrency cost: 4 units per request\n\n**Account Details:**\n- Organization: org_ArwgwxmGQdRFW64mEpgga\n- Plan: feather_pro_plus\n- Plan concurrency limit: 4\n- Subscription quantity: 1\n- Effective limit: 4 units\n\nPlease upgrade your plan to increase your concurrency limit or wait for current requests to complete.', 'type': 'invalid_request_error', 'param': None, 'code': 'concurrency_limit_exceeded'}}
+[v1-current] Q7 (basic) ... 15.0s | ERROR: RateLimitError: Error code: 429 - {'error': {'message': 'Concurrency limit exceeded. Your account details:\n\n**Current 
