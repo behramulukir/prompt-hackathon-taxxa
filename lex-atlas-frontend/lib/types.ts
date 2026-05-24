@@ -124,6 +124,9 @@ export interface ChatTurn {
   answer?: string;
   /** Final cost in cents reported by the stream. */
   costCents?: number;
+  /** LLM-graded confidence in the answer. Drives the pill color + the
+   *  "Ask specialist" CTA on low-confidence turns. */
+  confidence?: ConfidenceLevel;
   /** Whether the stream finished cleanly. */
   done?: boolean;
 }
@@ -190,10 +193,14 @@ export interface DebateTrace {
    Mirrored exactly from lex_atlas/observability/events.py.
    ─────────────────────────────────────────────────────────────────────────── */
 
+/** Confidence verdict the LLM grader returned for an answer. */
+export type ConfidenceLevel = "high" | "medium" | "low";
+
 export type AgentEvent =
   | { type: "ner_pulse"; entityNodeIds: string[] }                    // typing → faint constellation pulse
   | { type: "plan"; subQuestions: string[]; entityNodeIds: string[] }   // Planner trail draws
   | { type: "walked"; nodeId: string; score: number; step: number }    // each retriever step → halo
+  | { type: "confidence"; level: ConfidenceLevel }                     // LLM-graded answer confidence
   | { type: "subgraph_ready"; orbitNodes: OrbitNode[]; orbitEdges: OrbitEdge[] } // orbital pull begins
   | { type: "debate_open"; partyAId: string; partyBId: string }         // The Debate splits the answer area
   | { type: "debate_token"; party: "A" | "B"; text: string }            // streaming both sides

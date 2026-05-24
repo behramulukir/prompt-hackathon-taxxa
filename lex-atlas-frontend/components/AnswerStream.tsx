@@ -54,6 +54,7 @@ export function AnswerStream({ question, asof, lang, mode = "ask", instant = fal
   const appendDebateMessage = useGraphStore((s) => s.appendDebateMessage);
   const clearDebateMessages = useGraphStore((s) => s.clearDebateMessages);
   const setCostCents = useGraphStore((s) => s.setCostCents);
+  const setConfidence = useGraphStore((s) => s.setConfidence);
   const nodeKind = useGraphStore((s) => s.nodeKind);
   const phase = useGraphStore((s) => s.phase);
   const setPhase = useGraphStore((s) => s.setPhase);
@@ -83,6 +84,12 @@ export function AnswerStream({ question, asof, lang, mode = "ask", instant = fal
     setDone(false);
     setError(null);
     setPhase("starting");
+    // Clear the global cost + confidence so the active-turn pill
+    // doesn't show the previous turn's values while the new turn is
+    // mid-stream. Both events fire near the tail of the SSE stream and
+    // will overwrite these placeholders before ``done``.
+    setCostCents(0);
+    setConfidence(null);
 
     // Local accumulator. setRawAnswer is async + batched, so we can't read
     // back the post-update value synchronously inside `dispatch`. Keep our
@@ -197,6 +204,9 @@ export function AnswerStream({ question, asof, lang, mode = "ask", instant = fal
         case "cost":
           setCostCents(e.cents);
           break;
+        case "confidence":
+          setConfidence(e.level);
+          break;
         case "done":
           setPhase("done");
           setDone(true);
@@ -217,7 +227,7 @@ export function AnswerStream({ question, asof, lang, mode = "ask", instant = fal
     setDimmed, setCenterNodeId,
     setConflictPairs, setDebate, setDebateActive,
     appendDebateMessage, clearDebateMessages,
-    setCostCents, onComplete,
+    setCostCents, setConfidence, onComplete,
     setPhase, incWalked, setPlanCounts, addDraftChars,
   ]);
 

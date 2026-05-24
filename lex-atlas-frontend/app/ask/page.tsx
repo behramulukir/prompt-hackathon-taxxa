@@ -177,6 +177,7 @@ export default function AskPage() {
           conflictPairs: entry.cached.conflictPairs,
           debate: entry.cached.debate,
           costCents: entry.costCents,
+          confidence: entry.cached.confidence ?? null,
         });
         setTurns([
           {
@@ -190,6 +191,7 @@ export default function AskPage() {
             answer: entry.cached.answer,
             done: true,
             costCents: entry.costCents,
+            confidence: entry.cached.confidence,
           },
         ]);
         return;
@@ -207,31 +209,44 @@ export default function AskPage() {
     reset();
   }, [reset]);
 
-  /* On `done`, freeze the streamed answer into the turn and push the FIRST
-     turn of each conversation to long-lived history. Follow-ups inherit
-     the conversation by virtue of being saved next to turn 1.
-     Also snapshots orbitNodes/orbitEdges/debate/conflicts into
-     ``HistoryEntry.cached`` so the next recall of this query can replay
-     instantly without re-hitting the pipeline. */
+  /* On `done`, freeze the streamed answer into the turn and re-push the
+     conversation's history entry. The entry is keyed on turn-1's id, so
+     every completion (turn 1, turn 2, ...) updates the same row.
+     Cost is cumulative across all completed turns — a 2-turn chat that
+     billed 0.22 ¢ then 0.22 ¢ surfaces 0.44 ¢ in history, not 0.22 ¢. */
   const handleTurnComplete = useCallback(
     (turnId: string) => (answer: string) => {
       const s = useGraphStore.getState();
       const cents = s.costCents;
       const hadDebate = s.debateActive;
+      const confidence = s.confidence;
       setTurns((prev) => {
         const next = prev.map((t) =>
           t.id === turnId
-            ? { ...t, answer, done: true, costCents: cents > 0 ? cents : undefined }
+            ? {
+                ...t,
+                answer,
+                done: true,
+                costCents: cents > 0 ? cents : undefined,
+                confidence: confidence ?? undefined,
+              }
             : t
         );
-        const idx = next.findIndex((t) => t.id === turnId);
-        if (idx === 0) {
+        const firstId = next[0]?.id;
+        if (firstId) {
+          // Sum costs across every completed turn in this conversation.
+          // ``next`` already reflects the just-completed turn, so this
+          // run includes it.
+          const totalCents = next.reduce(
+            (acc, t) => acc + (t.costCents ?? 0),
+            0
+          );
           pushHistory({
-            id: turnId,
+            id: firstId,
             question: next[0].question,
             asof: next[0].asof,
             demo: "custom",
-            costCents: cents > 0 ? cents : undefined,
+            costCents: totalCents > 0 ? totalCents : undefined,
             hadDebate,
             cached: {
               answer,
@@ -239,6 +254,7 @@ export default function AskPage() {
               orbitEdges: s.orbitEdges,
               conflictPairs: s.conflictPairs,
               debate: s.debate,
+              confidence: confidence ?? undefined,
             },
           });
         }
@@ -969,22 +985,7 @@ function TurnCard({
             >
               Synthesis &amp; Resolution
             </span>
-            {isActive ? (
-              <AnswerStatusPill phase={phase} />
-            ) : (
-              <span
-                className="meta-pill ml-auto"
-                style={{
-                  color: "var(--color-secondary)",
-                  borderColor: "var(--color-secondary)",
-                }}
-                title="Completed turn"
-              >
-                {turn.costCents && turn.costCents > 0
-                  ? formatCents(turn.costCents)
-                  : "Done"}
-              </span>
-            )}
+            <TurnStatus turn={turn} isActive={isActive} phase={phase} />
           </div>
 
           {/* Progressive loading indicator — only while the turn is active. */}
@@ -1021,25 +1022,320 @@ function TurnCard({
   );
 }
 
-/** Pill at the top-right of the synthesis card. While the agent is
- *  working, shows "Streaming…". On done, shows the cost. */
-function AnswerStatusPill({ phase }: { phase: string }) {
-  const cents = useGraphStore((s) => s.costCents);
-  const done = phase === "done";
+/* ─────────────────────────────────────────────────────────────────────
+ * Synthesis card status: confidence pill + cost pill + (low-conf only)
+ * an Ask-Specialist CTA. Read-paths split by active/inactive:
+ *   - active turn:   pull from store (live SSE state)
+ *   - inactive turn: pull from `turn.confidence` / `turn.costCents`
+ * ─────────────────────────────────────────────────────────────────── */
+
+function TurnStatus({
+  turn,
+  isActive,
+  phase,
+}: {
+  turn: ChatTurn;
+  isActive: boolean;
+  phase: string;
+}) {
+  const liveConfidence = useGraphStore((s) => s.confidence);
+  const liveCents = useGraphStore((s) => s.costCents);
+  const [modalOpen, setModalOpen] = useState(false);
+
+  const done = !isActive || phase === "done";
   if (!done) {
     return <span className="meta-pill ml-auto">Streaming…</span>;
   }
+
+  const confidence = isActive ? liveConfidence : turn.confidence ?? null;
+  const cents = isActive ? liveCents : turn.costCents ?? 0;
+
+  return (
+    <>
+      <div className="ml-auto flex flex-wrap items-center gap-2">
+        {confidence && <ConfidencePill level={confidence} />}
+        {cents > 0 && (
+          <span
+            className="meta-pill"
+            style={{
+              color: "var(--color-secondary)",
+              borderColor: "var(--color-secondary)",
+            }}
+            title="Estimated cost of the DeepSeek call for this query"
+          >
+            {formatCents(cents)}
+          </span>
+        )}
+        {confidence === "low" && (
+          <button
+            type="button"
+            onClick={() => setModalOpen(true)}
+            className="flex items-center gap-1 border border-error/60 px-2 py-1 font-mono uppercase tracking-wider text-error transition-colors hover:bg-error-container/40"
+            style={{ fontSize: "var(--text-overline)" }}
+            title="The AI's confidence is low — escalate to a tax specialist"
+          >
+            <span className="material-symbols-outlined" style={{ fontSize: 14 }}>
+              support_agent
+            </span>
+            Ask specialist
+          </button>
+        )}
+      </div>
+      {modalOpen && (
+        <AskSpecialistModal
+          turn={turn}
+          onClose={() => setModalOpen(false)}
+        />
+      )}
+    </>
+  );
+}
+
+/* ─────────────────────────────────────────────────────────────────────
+ * Confidence pill — color-coded by level. The high/medium/low strings
+ * come straight from the LLM grader (see src/api/confidence.py).
+ * ─────────────────────────────────────────────────────────────────── */
+
+function ConfidencePill({ level }: { level: "high" | "medium" | "low" }) {
+  // Re-use existing CSS color tokens so the pill matches the rest of
+  // the design without inventing new colors:
+  //   high   → secondary (terracotta) — same as the cost pill on done
+  //   medium → on-surface-variant (neutral)
+  //   low    → error (red)
+  const palette = {
+    high:   { color: "var(--color-secondary)",        border: "var(--color-secondary)" },
+    medium: { color: "var(--color-on-surface-variant)", border: "var(--color-outline-variant)" },
+    low:    { color: "var(--color-error)",            border: "var(--color-error)" },
+  }[level];
+
+  const tooltip = {
+    high:   "The grader rated this answer well-supported and unambiguous.",
+    medium: "Mostly supported, but with hedging or partial coverage.",
+    low:    "The grader flagged this as unreliable — consider asking a specialist.",
+  }[level];
+
   return (
     <span
-      className="meta-pill ml-auto"
-      style={{
-        color: "var(--color-secondary)",
-        borderColor: "var(--color-secondary)",
-      }}
-      title="Estimated cost of the DeepSeek call for this query"
+      className="meta-pill"
+      style={{ color: palette.color, borderColor: palette.border }}
+      title={tooltip}
     >
-      {cents > 0 ? formatCents(cents) : "Done"}
+      Confidence: {level.charAt(0).toUpperCase() + level.slice(1)}
     </span>
+  );
+}
+
+/* ─────────────────────────────────────────────────────────────────────
+ * Ask-Specialist modal — surfaces a copyable prewritten email so the
+ * user can escalate the question to a Taxxa tax specialist with one
+ * paste. Composed entirely client-side; no mailto: handler (would lose
+ * the answer body in many clients).
+ * ─────────────────────────────────────────────────────────────────── */
+
+const SPECIALIST_EMAIL = "john.doe@taxxa.ai";
+
+function AskSpecialistModal({
+  turn,
+  onClose,
+}: {
+  turn: ChatTurn;
+  onClose: () => void;
+}) {
+  const [copied, setCopied] = useState<"none" | "email" | "subject" | "body">("none");
+
+  // Dismiss on Esc.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  const subject = `Tax question (low-confidence AI answer): ${turn.question.slice(0, 60)}${turn.question.length > 60 ? "…" : ""}`;
+  // Strip cite tokens from the answer so the email reads cleanly.
+  const cleanAnswer = (turn.answer ?? "").replace(
+    /\[cite:node:[^\]]+\]([^[]*?)\[\/cite\]/g,
+    "$1"
+  );
+  const body =
+    `Hi,\n\n` +
+    `Our AI tax assistant produced a draft answer to the question below but ` +
+    `graded its own confidence as LOW. Could you review and provide ` +
+    `definitive guidance?\n\n` +
+    `--- QUESTION ---\n${turn.question}\n\n` +
+    (cleanAnswer
+      ? `--- AI DRAFT (low confidence) ---\n${cleanAnswer}\n\n`
+      : ``) +
+    `Asof: ${turn.asof}\n` +
+    `Lex Atlas Q-ID: ${turn.id}\n\n` +
+    `Best regards`;
+
+  const copy = (text: string, kind: "email" | "subject" | "body") => {
+    if (typeof navigator !== "undefined" && navigator.clipboard) {
+      navigator.clipboard.writeText(text).then(() => {
+        setCopied(kind);
+        setTimeout(() => setCopied("none"), 1500);
+      }).catch(() => {/* clipboard blocked — caller can still select manually */});
+    }
+  };
+
+  return (
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="ask-specialist-title"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4"
+      onClick={onClose}
+    >
+      <div
+        className="w-full max-w-2xl border border-outline-variant bg-surface-container-lowest shadow-[0_24px_64px_rgba(0,0,0,0.18)]"
+        onClick={(e) => e.stopPropagation()}
+      >
+        {/* Header */}
+        <div className="flex items-center justify-between border-b border-outline-variant px-5 py-3">
+          <h2
+            id="ask-specialist-title"
+            className="flex items-center gap-2 font-serif font-medium text-on-surface"
+            style={{ fontSize: "var(--text-h4)" }}
+          >
+            <span className="material-symbols-outlined text-error" style={{ fontSize: 22 }}>
+              support_agent
+            </span>
+            Ask a Taxxa specialist
+          </h2>
+          <button
+            type="button"
+            onClick={onClose}
+            className="flex h-7 w-7 items-center justify-center border border-outline-variant transition-colors hover:bg-surface-container"
+            aria-label="Close"
+          >
+            <span className="material-symbols-outlined" style={{ fontSize: 16 }}>close</span>
+          </button>
+        </div>
+
+        {/* Body */}
+        <div className="space-y-4 px-5 py-4">
+          <p
+            className="font-sans text-on-surface-variant"
+            style={{ fontSize: "var(--text-body-sm)", lineHeight: 1.55 }}
+          >
+            The AI graded its own confidence as <strong className="text-error">Low</strong>.
+            Copy the draft email below into your mail client and send it for
+            an expert review.
+          </p>
+
+          <CopyRow
+            label="To"
+            value={SPECIALIST_EMAIL}
+            copied={copied === "email"}
+            onCopy={() => copy(SPECIALIST_EMAIL, "email")}
+          />
+          <CopyRow
+            label="Subject"
+            value={subject}
+            copied={copied === "subject"}
+            onCopy={() => copy(subject, "subject")}
+          />
+
+          <div>
+            <div className="mb-1 flex items-center justify-between">
+              <span
+                className="font-mono uppercase tracking-wider text-on-surface-variant"
+                style={{ fontSize: "var(--text-overline)" }}
+              >
+                Body
+              </span>
+              <button
+                type="button"
+                onClick={() => copy(body, "body")}
+                className="flex items-center gap-1 border border-outline-variant px-2 py-1 font-mono uppercase tracking-wider text-on-surface-variant transition-colors hover:bg-surface-container hover:text-on-surface"
+                style={{ fontSize: "var(--text-overline)" }}
+              >
+                <span className="material-symbols-outlined" style={{ fontSize: 14 }}>
+                  {copied === "body" ? "check" : "content_copy"}
+                </span>
+                {copied === "body" ? "Copied" : "Copy"}
+              </button>
+            </div>
+            <textarea
+              readOnly
+              value={body}
+              className="w-full resize-none border border-outline-variant bg-surface-container-low p-3 font-mono text-on-surface focus:outline-none"
+              style={{
+                fontSize: "var(--text-body-sm)",
+                lineHeight: 1.55,
+                minHeight: 220,
+              }}
+              onFocus={(e) => e.currentTarget.select()}
+            />
+          </div>
+        </div>
+
+        {/* Footer */}
+        <div className="flex justify-end gap-2 border-t border-outline-variant px-5 py-3">
+          <button
+            type="button"
+            onClick={() => copy(`${SPECIALIST_EMAIL}\n${subject}\n\n${body}`, "body")}
+            className="btn-primary btn-sm"
+          >
+            <span className="material-symbols-outlined" style={{ fontSize: "var(--icon-sm)" }}>
+              content_copy
+            </span>
+            Copy full email
+          </button>
+          <button
+            type="button"
+            onClick={onClose}
+            className="flex items-center gap-2 border border-outline-variant px-3 py-1.5 font-mono text-xs uppercase tracking-wider text-on-surface-variant transition-colors hover:bg-surface-container hover:text-on-surface"
+          >
+            Close
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function CopyRow({
+  label,
+  value,
+  copied,
+  onCopy,
+}: {
+  label: string;
+  value: string;
+  copied: boolean;
+  onCopy: () => void;
+}) {
+  return (
+    <div>
+      <div className="mb-1 flex items-center justify-between">
+        <span
+          className="font-mono uppercase tracking-wider text-on-surface-variant"
+          style={{ fontSize: "var(--text-overline)" }}
+        >
+          {label}
+        </span>
+        <button
+          type="button"
+          onClick={onCopy}
+          className="flex items-center gap-1 border border-outline-variant px-2 py-1 font-mono uppercase tracking-wider text-on-surface-variant transition-colors hover:bg-surface-container hover:text-on-surface"
+          style={{ fontSize: "var(--text-overline)" }}
+        >
+          <span className="material-symbols-outlined" style={{ fontSize: 14 }}>
+            {copied ? "check" : "content_copy"}
+          </span>
+          {copied ? "Copied" : "Copy"}
+        </button>
+      </div>
+      <div
+        className="break-all border border-outline-variant bg-surface-container-low px-3 py-2 font-mono text-on-surface"
+        style={{ fontSize: "var(--text-body-sm)" }}
+      >
+        {value}
+      </div>
+    </div>
   );
 }
 

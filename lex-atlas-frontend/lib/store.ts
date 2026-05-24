@@ -1,7 +1,7 @@
 "use client";
 
 import { create } from "zustand";
-import type { OrbitEdge, OrbitNode, NodeKind, DebateTrace } from "./types";
+import type { OrbitEdge, OrbitNode, NodeKind, DebateTrace, ConfidenceLevel } from "./types";
 
 /** Streamed debate fragment — accumulated per party as `debate_token` events arrive. */
 export interface DebateFragment {
@@ -95,6 +95,9 @@ interface GraphStore {
 
   // Cost meter
   costCents: number;
+  /** Set by the `confidence` SSE event right before `done`. Null while
+   *  streaming. The active-turn pill colors itself by this. */
+  confidence: ConfidenceLevel | null;
 
   // ─── Loading / phase state ─────────────────────────────────────
   /** Current phase of the agent execution. Drives <AgentProgress>. */
@@ -132,6 +135,7 @@ interface GraphStore {
   clearDebateMessages: () => void;
   setAsof: (iso: string) => void;
   setCostCents: (c: number) => void;
+  setConfidence: (level: ConfidenceLevel | null) => void;
 
   // Phase actions
   setPhase: (p: AgentPhase) => void;
@@ -150,6 +154,7 @@ interface GraphStore {
     conflictPairs: [string, string][];
     debate?: DebateTrace | null;
     costCents?: number;
+    confidence?: ConfidenceLevel | null;
   }) => void;
 }
 
@@ -177,6 +182,7 @@ export const useGraphStore = create<GraphStore>((set, get) => ({
   nodeIdToIndex: {},
   nodeKind: {},
   costCents: 0,
+  confidence: null,
   phase: "idle",
   walkedCount: 0,
   plannedSubQuestions: 0,
@@ -219,6 +225,7 @@ export const useGraphStore = create<GraphStore>((set, get) => ({
   clearDebateMessages: () => set({ debateMessages: [] }),
   setAsof: (iso) => set({ asof: iso }),
   setCostCents: (c) => set({ costCents: c }),
+  setConfidence: (level) => set({ confidence: level }),
   setPhase: (p) => set({ phase: p }),
   incWalked: () => set((s) => ({ walkedCount: s.walkedCount + 1 })),
   setPlanCounts: (subQ, ent) =>
@@ -243,6 +250,7 @@ export const useGraphStore = create<GraphStore>((set, get) => ({
       debateActive: false,
       debateMessages: [],
       costCents: 0,
+      confidence: null,
       phase: "idle",
       walkedCount: 0,
       plannedSubQuestions: 0,
@@ -262,6 +270,7 @@ export const useGraphStore = create<GraphStore>((set, get) => ({
       debateActive: !!snap.debate,
       debateMessages: [],
       costCents: snap.costCents ?? 0,
+      confidence: snap.confidence ?? null,
       dimmed: true,
       // Final phase so AgentProgress vanishes and the synthesis pill
       // flips to the cost glyph straight away.

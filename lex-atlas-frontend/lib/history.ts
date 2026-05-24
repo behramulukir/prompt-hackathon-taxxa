@@ -20,7 +20,7 @@
  */
 
 import { useCallback, useEffect, useState } from "react";
-import type { OrbitNode, OrbitEdge, DebateTrace } from "@/lib/types";
+import type { OrbitNode, OrbitEdge, DebateTrace, ConfidenceLevel } from "@/lib/types";
 
 /** Frozen snapshot of everything the synthesis view needs to redisplay a
  *  past query: the streamed answer text (still carrying [cite:node:X]
@@ -39,6 +39,8 @@ export interface CachedAnswer {
   conflictPairs: [string, string][];
   /** Debate transcript when one fired. */
   debate?: DebateTrace | null;
+  /** LLM-graded confidence at done-time. */
+  confidence?: ConfidenceLevel;
 }
 
 export interface HistoryEntry {

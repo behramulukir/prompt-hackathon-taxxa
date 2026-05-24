@@ -42,6 +42,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
+from src.api.confidence import evaluate_confidence
 from src.api.events import (
     build_orbit,
     estimate_cost_cents,
@@ -307,22 +308,47 @@ def _sse(event: dict[str, Any]) -> bytes:
     return f"data: {json.dumps(event, ensure_ascii=False)}\n\n".encode("utf-8")
 
 
-# Tokenization for the draft stream — chunk on whitespace + cite boundaries
-# so the cite tokens stay intact (the AnswerStream regex needs them whole).
-_DRAFT_SPLIT_RE = re.compile(r"(\[cite:node:[^\]]+\][^\[]*\[/cite\]|\S+\s*)")
+# Tokenization for the draft stream.
+#
+# Two-stage split: first peel off cite tokens (so they stream as one piece —
+# the client-side renderer regex needs them whole), then chunk each run of
+# in-between text into word-sized pieces while keeping every character.
+#
+# The previous one-shot regex ``(\[cite:node:...\]...\[/cite\]|\S+\s*)``
+# silently dropped any character that matched neither alternative — most
+# visibly the single space right after a cite token's closing ``[/cite]``,
+# because ``\S+`` requires a non-whitespace start, so finditer skipped the
+# space and the rendered text showed ``Source 1Yhtiöt`` (no separator).
+_CITE_SPLIT_RE = re.compile(r"(\[cite:node:[^\]]+\][^\[]*\[/cite\])")
+_WORD_CHUNK_RE = re.compile(r"\s*\S+\s*")
 
 
 def _draft_chunks(answer: str) -> list[str]:
     """Split a rewritten answer into ~word-sized fragments for streaming.
 
-    Cite tokens are always one chunk so the regex on the client side never
-    sees them broken in half.
+    Lossless: ``"".join(_draft_chunks(s)) == s`` for any input. Cite tokens
+    are always emitted as a single chunk so the client regex never sees
+    them broken in half.
     """
     out: list[str] = []
-    for m in _DRAFT_SPLIT_RE.finditer(answer):
-        chunk = m.group(0)
-        if chunk:
-            out.append(chunk)
+    for part in _CITE_SPLIT_RE.split(answer):
+        if not part:
+            continue
+        if part.startswith("[cite:node:") and part.endswith("[/cite]"):
+            out.append(part)
+            continue
+        # Plain-text run between cite tokens. ``\s*\S+\s*`` keeps the
+        # leading/trailing whitespace attached to each word, so the space
+        # that used to vanish right after ``[/cite]`` stays in the chunk.
+        matched = 0
+        for m in _WORD_CHUNK_RE.finditer(part):
+            out.append(m.group(0))
+            matched += len(m.group(0))
+        # All-whitespace run (e.g. between adjacent cite tokens): finditer
+        # produces nothing because ``\S+`` requires a non-whitespace char.
+        # Emit the leftover so we never lose a separator character.
+        if matched < len(part):
+            out.append(part[matched:])
     return out
 
 
@@ -544,11 +570,31 @@ async def _ask_stream(body: AskBody, request: Request) -> AsyncIterator[bytes]:
         ",".join(str(i) for i in gen.cited_indices) or "(none)",
         timings["generate"],
     )
+    # Surface the first 120 chars of the LLM answer so anyone debugging
+    # "missing first word" / preamble issues can correlate the raw output
+    # with what's on the wire.
+    log.info("generate · head: %s", _trunc(gen.answer, 120))
 
     # Rewrite [Source N] → [cite:node:<chunk_id>]Source N[/cite] before
     # streaming so the frontend's render path attaches hover handlers.
     answer_with_cites = rewrite_citations(gen.answer, context)
     chunks = _draft_chunks(answer_with_cites)
+
+    # Self-check: every byte of the rewritten answer must appear in the
+    # chunk stream. If a future regex change drops chars, this surfaces
+    # immediately instead of silently mangling the rendered answer.
+    joined = "".join(chunks)
+    if joined != answer_with_cites:
+        log.warning(
+            "draft_chunks LOSSY: %d→%d chars (first diff: %r)",
+            len(answer_with_cites), len(joined),
+            _trunc(answer_with_cites[: max(0, min(len(answer_with_cites), len(joined)) + 20)], 80),
+        )
+    log.info(
+        "draft_chunks · n=%d · first=%s",
+        len(chunks),
+        repr(chunks[0]) if chunks else "(empty)",
+    )
 
     # Per-chunk delay so the typewriter effect is visible. The frontend
     # passes ``instant: true`` for screenshots / e2e — honor that.
@@ -565,6 +611,20 @@ async def _ask_stream(body: AskBody, request: Request) -> AsyncIterator[bytes]:
         yield _sse({"type": "draft_token", "text": chunk})
         if delay:
             await asyncio.sleep(delay)
+
+    # Confidence — small companion LLM call grading the draft answer.
+    # Runs on the pinned worker so the OpenAI client doesn't fight the
+    # generate() one for the SQLite/LanceDB thread. Soft-fails to
+    # "medium" inside ``evaluate_confidence`` — we never block done on it.
+    t = time.perf_counter()
+    confidence = await _on_worker(
+        lambda: evaluate_confidence(
+            question=body.question, answer=gen.answer, context=context
+        )
+    )
+    timings["confidence"] = _ms_since(t)
+    log.info("confidence · %s · %d ms", confidence, timings["confidence"])
+    yield _sse({"type": "confidence", "level": confidence})
 
     timings["total"] = _ms_since(t_total)
     cents = estimate_cost_cents(gen.answer, context, question=body.question)

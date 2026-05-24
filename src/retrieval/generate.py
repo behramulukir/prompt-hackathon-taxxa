@@ -133,6 +133,68 @@ def parse_citations(answer: str) -> list[int]:
     return out
 
 
+# Patterns the LLM has been observed to lead with even when the system
+# prompt forbids preambles. Stripped at the start of the answer only
+# (the ``^`` anchor matters — temporal "Huomioitavaa:" / "Note:" blocks
+# the prompt explicitly asks for trail at the END and must survive).
+#
+# Tested against:
+#   "<think>Let me check...</think>The answer is..."     → "The answer is..."
+#   "(Note: based on Source 1) Yhtiöt..."                → "Yhtiöt..."
+#   "**Vastaus:** Yhtiöt..."                             → "Yhtiöt..."
+#   "Vastaus: Yhtiöt..."                                 → "Yhtiöt..."
+#   "Based on the sources, Yhtiöt..."                    → "Yhtiöt..."
+_PREAMBLE_PATTERNS: tuple[re.Pattern[str], ...] = (
+    # DeepSeek-style reasoning block — strip the whole <think>…</think>
+    re.compile(r"\A\s*<think>.*?</think>\s*", re.DOTALL | re.IGNORECASE),
+    # Leading parenthetical aside ("(Note: …)"). Capped at 200 chars so we
+    # don't accidentally eat a long opening sentence wrapped in parens.
+    re.compile(r"\A\s*\([^)\n]{1,200}\)\s*"),
+    # Leading bold header like **Vastaus:** or **Answer:** (with trailing
+    # colon, dash, or em-dash — the header form, not a bold first phrase).
+    re.compile(
+        r"\A\s*\*\*\s*(?:vastaus|answer|note|huomio|huomioitavaa|yhteenveto|summary)"
+        r"\s*[:\-—]\s*\*\*\s*",
+        re.IGNORECASE,
+    ),
+    # Bare header word: "Vastaus: …", "Answer: …", "Note: …"
+    re.compile(
+        r"\A\s*(?:vastaus|answer|note|huomio|huomioitavaa|yhteenveto|summary)"
+        r"\s*[:\-—]\s+",
+        re.IGNORECASE,
+    ),
+    # Stock prefaces: "Based on the sources, …", "Lähteiden perusteella, …"
+    re.compile(
+        r"\A\s*(?:based on (?:the )?sources?|according to (?:the )?sources?|"
+        r"lähteiden perusteella|annettujen lähteiden perusteella)\s*[,:]\s+",
+        re.IGNORECASE,
+    ),
+)
+
+
+def _strip_answer_preamble(answer: str) -> str:
+    """Belt-and-suspenders for the system-prompt "begin directly" rule.
+
+    Strips a leading parenthetical / header / reasoning block from the LLM
+    output BEFORE rewrite_citations runs. The rule is in the system prompt
+    already; this is a defensive cleanup for cases where the model still
+    emits a preface (DeepSeek-V4-Flash has been observed to wrap answers in
+    a parenthetical when it's not fully sure, despite instructions).
+
+    Idempotent: re-applied until no pattern matches, so a model that emits
+    BOTH a ``<think>`` block AND a ``Vastaus:`` header loses both. Bounded
+    at 4 iterations so a malformed input can't loop.
+    """
+    cleaned = answer
+    for _ in range(4):
+        before = cleaned
+        for pat in _PREAMBLE_PATTERNS:
+            cleaned = pat.sub("", cleaned, count=1)
+        if cleaned == before:
+            break
+    return cleaned.lstrip()
+
+
 # --------------------------------------------------------------------------
 # Public entry point
 # --------------------------------------------------------------------------
@@ -216,6 +278,11 @@ def generate(
         raise RuntimeError(f"LLM call failed: {last_err}")
 
     answer = (resp.choices[0].message.content or "").strip()
+    # Defensive: the system prompt forbids preambles, but the model
+    # occasionally ignores it (typically a leading parenthetical or a
+    # ``Vastaus:`` header). Strip those so the rendered answer always
+    # opens with the substantive sentence.
+    answer = _strip_answer_preamble(answer)
 
     cited_indices = parse_citations(answer)
     cited_chunk_ids: list[str] = []
