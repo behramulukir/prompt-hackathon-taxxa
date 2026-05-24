@@ -105,7 +105,7 @@ const RELATION_LABEL: Record<EdgeRelation, string> = {
 /* ────────────────────────────────────────────────────────────────────────
    Edge synthesis from node-id structure.
 
-   Real Lex Atlas node ids look like:
+   Real RAGTAG node ids look like:
        finlex/laki/finlex-laki-ennakkoperintalaki-1-html-c4e849e0
        finlex/laki/finlex-laki-ennakkoperintalaki-1-html-c4e849e0/c1
        finlex/laki/finlex-laki-ennakkoperintalaki-1-html-c4e849e0/c1/s30a

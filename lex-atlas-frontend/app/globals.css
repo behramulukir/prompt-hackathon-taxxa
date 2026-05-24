@@ -9,7 +9,7 @@
 @custom-variant dark (&:where(.dark, .dark *));
 
 /* ---------------------------------------------------------------
-   Lex Atlas - design tokens (Stitch-derived, light + editorial).
+   RAGTAG - design tokens (Stitch-derived, light + editorial).
    Paper off-white background, terracotta accent, hard borders.
    Headlines: EB Garamond. Body: Inter. Labels: JetBrains Mono.
    --------------------------------------------------------------- */

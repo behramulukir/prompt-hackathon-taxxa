@@ -1,8 +1,8 @@
-# Lex Atlas
+# RAGTAG
 
-> The second brain for Finnish tax law.
+> Retrieval Augmented Graph Tax Answer Generator. The second brain for Finnish tax law.
 
-Lex Atlas replaces top-k chunk retrieval over Finlex + Vero with a typed temporal
+RAGTAG replaces top-k chunk retrieval over Finlex + Vero with a typed temporal
 graph, walked by a four-agent loop running locally on Gemma 3 27B. Every claim
 cites a node id and a `finlex.fi` / `vero.fi` URL. Local cost: ~€0.005 / query.
 Hosted cost (Sonnet): ~€0.045 / query. Both fit comfortably under the brief's

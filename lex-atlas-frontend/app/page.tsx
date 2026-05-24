@@ -85,7 +85,7 @@ export default function LandingPage() {
                 }}
               >
                 A continuous multi-agent retrieval and reasoning loop operating
-                over Finlex and Vero guidelines. Lex Atlas synthesizes an
+                over Finlex and Vero guidelines. RAGTAG synthesizes an
                 authoritative, structured legal topology to resolve complex
                 regulatory conflicts autonomously.
               </p>

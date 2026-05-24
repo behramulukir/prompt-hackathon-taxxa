@@ -103,7 +103,7 @@ export async function GET(req: NextRequest) {
 
   // 3. Last-resort fallback: synthesize a useful payload from the node id.
   //
-  // Real Lex Atlas node ids look like:
+  // Real RAGTAG node ids look like:
   //   finlex/laki/finlex-laki-ennakkoperintalaki-1-html-c4e849e0/c1/s30a
   //    ^^^^^^ ^^^^ ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ ^^^ ^^^^
   //   source subcorpus law-slug                                       anchor

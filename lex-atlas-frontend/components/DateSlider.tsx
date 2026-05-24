@@ -3,7 +3,7 @@
 /**
  * DateSlider — the time-travel scrub.
  *
- * Drag from 1990-01-01 to today. The Lex Atlas store's `asof` updates,
+ * Drag from 1990-01-01 to today. The RAGTAG store's `asof` updates,
  * which triggers a CSS-selector swap in ProvenanceOrbit (active/inactive
  * halo jumps to the newly-valid CTV) and a word-level FLIP cross-fade in
  * the answer text. No re-query of the agent — the cached subgraph holds

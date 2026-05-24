@@ -199,7 +199,7 @@ export default function AuditPage() {
               className="mt-5 max-w-3xl text-on-surface-variant"
               style={{ fontSize: 17, lineHeight: 1.6 }}
             >
-              Lex Atlas ingests {fmt(R.scan.files_total)} Finlex + Vero + KHO + treaty
+              RAGTAG ingests {fmt(R.scan.files_total)} Finlex + Vero + KHO + treaty
               HTML files into a hierarchically-typed property graph with{" "}
               <strong>8 edge kinds</strong>,{" "}
               <strong>{fmt(R.scan.chunks_scanned)}</strong> retrieval chunks,{" "}

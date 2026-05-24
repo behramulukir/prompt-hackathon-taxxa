@@ -160,7 +160,7 @@ export function TopologyCanvas({
       ref={canvasRef}
       className={"absolute inset-0 h-full w-full cursor-crosshair " + (className ?? "")}
       role="img"
-      aria-label="Lex Atlas topology · animated knowledge graph"
+      aria-label="RAGTAG topology · animated knowledge graph"
     />
   );
 }
