@@ -1,13 +1,9 @@
 /**
  * /methodology
  *
- *   1. Chat (the spine: 7 numbered quotes from 23.05).
- *   2. Part I: 6 things we tried, each tagged with the chat point that killed it.
- *   3. Part II: RAGTAG, 9 pieces, each tagged with the chat point it answers.
- *   4. Receipts (Q1, Q12, Q41, cost).
- *   5. References.
- *
- * Every card has at least one source chip.
+ * Two-part page anchored to Taxxa's 23.05 chat. Every claim cited to a
+ * file path or a research paper. Audited for accuracy on 24.05 against
+ * the actual repo.
  */
 
 import { Header } from "@/components/Header";
@@ -48,19 +44,19 @@ const EXPLORED: ExploredCard[] = [
     number: "01",
     title: "Bitemporal graph on Neo4j",
     italic: "every edge with its own validity window.",
-    body: "Schema lifted from SAT-Graph RAG (JURIX 2025).",
+    body: "Schema from SAT-Graph RAG (JURIX 2025). The whole ontology in a graph database.",
     sources: ["SAT-Graph RAG · arXiv:2505.00039", "LRMoo · IFLA"],
     killedBy: ["01"],
-    cut: "Two days into the ontology, still zero answers.",
+    cut: "Two days into the ontology, still zero answers. We kept the bitemporal idea and rebuilt it in SQLite as version_chain (see RAGTAG #08).",
   },
   {
     number: "02",
     title: "BGE-M3 hybrid retrieval",
     italic: "dense + sparse + ColBERT, fused at k=60.",
-    body: "Voyage voyage-3-large was already ranking the right chunk in the top 30.",
-    sources: ["BGE-M3 · BAAI", "ColBERT · SIGIR 2020", "RRF · SIGIR 2009"],
+    body: "BAAI's multilingual model with three signal heads. RRF for fusion, HyDE for English to Finnish query expansion.",
+    sources: ["BGE-M3 · BAAI", "ColBERT · SIGIR 2020", "RRF · SIGIR 2009", "HyDE · Gao et al. 2022"],
     killedBy: ["01"],
-    cut: "Second stack, no measurable lift.",
+    cut: "Voyage voyage-3-large already ranked the right chunk in the top 30 on every eval question. Adding a second stack failed the cost test.",
   },
   {
     number: "03",
@@ -69,34 +65,34 @@ const EXPLORED: ExploredCard[] = [
     body: "Three LLMs arguing per conflict, pattern from AgenticSimLaw.",
     sources: ["AgenticSimLaw · arXiv:2601.21936", "Multi-Agent Debate · NeurIPS 2023"],
     killedBy: ["03", "01"],
-    cut: "Chat #03 handed us the lattice. One integer compare resolves every conflict in our eval set.",
+    cut: "Chat #03 handed us the rule directly. One integer compare resolves every conflict in our eval set; seven LLM turns cost real money.",
   },
   {
     number: "04",
-    title: "63,660-node constellation map",
+    title: "63,660-node constellation",
     italic: "WebGL force layout of the whole corpus.",
-    body: "Attribution view modelled on Anthropic Circuit Tracer.",
+    body: "Attribution view inspired by Anthropic Circuit Tracer.",
     sources: ["@cosmos.gl/graph", "Anthropic Circuit Tracing · 2025"],
     killedBy: ["04"],
-    cut: "Judges need one answer's reasoning, not the corpus shape.",
+    cut: "Judges need one answer's reasoning, not the corpus shape. The reasoning panel animates the 5 to 10 nodes that actually mattered.",
   },
   {
     number: "05",
-    title: "Live SPARQL ground-truth fallback",
+    title: "Live SPARQL fallback",
     italic: "CRAG escalation into Semantic Finlex.",
-    body: "Self-RAG reflection tokens for citation overlap.",
+    body: "Self-RAG reflection tokens to enforce citation coverage at draft time.",
     sources: ["CRAG · arXiv:2401.15884", "Self-RAG · ICLR 2024", "data.finlex.fi/sparql"],
     killedBy: ["01"],
-    cut: "Cold SPARQL hit 9 seconds. Verifier + AmendmentCaveat covers 'unsure' offline.",
+    cut: "Cold SPARQL hit 9 seconds on the public endpoint. We can surface 'unsure' offline via AmendmentCaveat instead (RAGTAG #08).",
   },
   {
     number: "06",
     title: "EU-lex contradictions",
     italic: "primacy of EU law over national act.",
-    body: "transposes edge type stays in the schema as a future hook.",
+    body: "Ingest EUR-Lex directives, model a transposes edge, surface EU vs national conflicts.",
     sources: ["EUR-Lex · hierarchy of norms", "Lex superior · UN OLA"],
     killedBy: ["02"],
-    cut: "Chat #02 declared this out of scope.",
+    cut: "Chat #02 declared this out of scope. The transposes edge type stays in the schema as a hook for later.",
   },
 ];
 
@@ -112,74 +108,108 @@ interface ShippedCard {
 const SHIPPED: ShippedCard[] = [
   {
     number: "01",
-    title: "Anchor, then regex, then LLM",
-    italic: "~95% of edges from HTML anchors.",
-    body: "Finlex publishes in Akoma Ntoso (OASIS legal XML). Regex catches plain references. LLM only for ambiguous citations.",
-    sources: ["Akoma Ntoso · OASIS LegalDocML", "Finlex Akoma Ntoso · data.finlex.fi"],
+    title: "Three deterministic extraction passes",
+    italic: "structural, anchor, regex.",
+    body: "Edges are emitted by three rule-based passes over HTML and the document tree: structural (parent_of from the heading hierarchy), anchor (cross-references inside an <a href> attribute), and regex (text citations like '§ 102 AVL', 'KHO 2025:46'). No model in the batch graph build.",
+    sources: [
+      "src/extraction/structural_edges.py",
+      "src/extraction/anchor_edges.py",
+      "src/extraction/citations_regex.py",
+      "src/extraction/definition_edges.py",
+    ],
     delivers: ["07"],
   },
   {
     number: "02",
-    title: "Two files, one section_id",
-    italic: "LanceDB for vectors, SQLite for the graph.",
-    body: "No graph database server to operate.",
-    sources: ["LanceDB · lancedb.com", "SQLite · sqlite.org"],
+    title: "Two SQLite tables plus a local LanceDB",
+    italic: "nodes, edges, chunks. Joined by section_id.",
+    body: "1,967,776 nodes and 2,180,769 typed edges live in two SQLite tables (nodes, edges). 402,088 embedded chunks live in LanceDB on the filesystem (no remote service). Everything joins on section_id with an O(1) lookup.",
+    sources: [
+      "scripts/load_graph.py (nodes, edges CREATE TABLE)",
+      "findings/04a_index_sanity.md (402,088 chunks)",
+      "findings/04b_load_report.md (1.97M nodes, 2.18M edges)",
+      "src/indexing/vector_store.py (LanceDB)",
+    ],
     delivers: ["01"],
   },
   {
     number: "03",
-    title: "Strategy router, six presets",
-    italic: "case_law, recency, definition, cross_source, multi_hop, default.",
-    body: "Keyword + regex classifier picks an ExpansionStrategy per question. Routing pattern from CRAG.",
-    sources: ["CRAG · arXiv:2401.15884"],
+    title: "Section-anchored chunking",
+    italic: "800 to 1,500 tokens, 2,000 hard max, never split mid-citation.",
+    body: "The chunk unit is the SECTION (§). Children are greedily packed under their § head and never split across sentence, item, or citation boundaries. The result: every chunk carries its own legal anchor.",
+    sources: ["pipeline/chunks.py"],
     delivers: ["04"],
   },
   {
     number: "04",
-    title: "Bounded BFS with hub-skip",
-    italic: "skip nodes above per-edge degree caps.",
-    body: "Defaults: incoming interprets > 30, outgoing cites > 15, incoming parent_of > 50.",
-    sources: ["BFS · standard CS", "src/retrieval/graph_expand.py"],
-    delivers: ["04"],
+    title: "Multilingual embeddings via Voyage",
+    italic: "voyage-3-large, 1,024-dim, asymmetric query / document.",
+    body: "Hosted but cheap. Asymmetric (input_type='query' vs 'document') to avoid the quality cliff Voyage warns about. Same embedding space carries Finnish, Swedish, and English.",
+    sources: ["src/indexing/voyage_client.py (MODEL = voyage-3-large)", "voyageai.com"],
+    delivers: ["02"],
   },
   {
     number: "05",
-    title: "Cross-encoder rerank",
-    italic: "BAAI/bge-reranker-v2-m3, multilingual.",
-    body: "Final score: 0.6 cross-encoder + 0.3 cosine + 0.1 metadata. The biggest quality lever in v2.",
-    sources: ["bge-reranker-v2-m3 · BAAI", "Sentence-BERT · EMNLP 2019"],
+    title: "Strategy router, six presets",
+    italic: "case_law, recency, definition, cross_source, multi_hop, default.",
+    body: "A keyword and regex classifier on the question text picks one ExpansionStrategy. Each preset sets seed depth, edge types, BFS direction, max hops, and per-edge degree caps. Default falls back to vector-only retrieval.",
+    sources: ["src/retrieval/strategy.py"],
     delivers: ["04"],
   },
   {
     number: "06",
-    title: "Four narrow agents",
-    italic: "Planner, Extractor, Verifier, Clarifier.",
-    body: "One agent per failure mode. Pattern from DSPy.",
-    sources: ["DSPy · Stanford NLP"],
-    delivers: ["01"],
+    title: "Bounded BFS with hub-skip",
+    italic: "interprets_in > 30, cites_out > 15, parent_of_in > 50.",
+    body: "Default max_hops = 1. Hub nodes (widely cited statutes) are not expanded through. Final candidate set is truncated to fit a 25k-token context.",
+    sources: ["src/retrieval/graph_expand.py"],
+    delivers: ["04"],
   },
   {
     number: "07",
-    title: "Temporal correctness",
-    italic: "version_chain + as_of, in SQLite.",
-    body: "Per-SECTION chain of muutetaan / kumotaan / lisätään steps. text_at(section_id, as_of) plays it forward.",
-    sources: ["SAT-Graph RAG · arXiv:2505.00039", "Snodgrass, 1999"],
-    delivers: ["05"],
+    title: "Two reranking paths, one cross-encoder",
+    italic: "v2 uses bge-reranker-v2-m3, v1 uses metadata signals.",
+    body: "v2 runs BAAI/bge-reranker-v2-m3 (a multilingual cross-encoder) over 30 to 40 candidates and combines 0.6 cross-encoder + 0.3 cosine + 0.1 metadata. v1 (the default path in the API sidecar today) uses a metadata reranker: authority_rank, recency, term overlap.",
+    sources: [
+      "src/retrieval/cross_encoder_rerank.py (bge-reranker-v2-m3)",
+      "src/retrieval/rerank.py (metadata reranker)",
+    ],
+    delivers: ["04"],
   },
   {
     number: "08",
-    title: "Authority is one integer",
-    italic: "Finlex 100, KHO 85, Vero 50 to 60.",
-    body: "Verifier compares ranks, picks higher, states the rule. Lattice direct from chat #03; doctrine is lex superior.",
-    sources: ["Team chat #03", "Lex superior · UN OLA"],
-    delivers: ["03"],
+    title: "Temporal correctness",
+    italic: "version_chain, as_of, AmendmentCaveat. All deterministic.",
+    body: "Every SECTION carries a chronological version_chain of muutetaan, kumotaan, lisätään steps. GraphStore.text_at(section_id, as_of) plays it forward. Every cited chunk on a stale ancestor emits an AmendmentCaveat (suspect, stale, repealed). A separate check_temporal_mismatches function compares the drafted answer against the section's chain via difflib; no LLM in this check.",
+    sources: [
+      "src/indexing/graph_store.py (text_at)",
+      "src/models.py (VersionStep, AmendmentCaveat)",
+      "src/agents/verifier.py (check_temporal_mismatches)",
+      "src/retrieval/pipeline_v2.py (wires both)",
+    ],
+    delivers: ["05"],
   },
   {
     number: "09",
-    title: "DeepSeek-V4-Flash via Featherless",
-    italic: "Gemma 3 27B local fallback on Ollama.",
-    body: "Hosted ≈ €0.04 / query. Local ≈ €0.005 / query. Brief cap €1.",
-    sources: ["DeepSeek", "Featherless", "Gemma 3", "Ollama"],
+    title: "Authority is one integer",
+    italic: "Finlex 100, Treaty 90, KHO 80, Vero 60.",
+    body: "Ranks are assigned at ingestion from source / source_subcorpus and stored on every node. Conflict surfacing compares the integer; the team's lattice (Finlex over Vero, KHO can overwrite Vero) drops out of this directly.",
+    sources: [
+      "src/extraction/authority.py",
+      "findings/03_authority_ranks.md",
+      "Lex superior · UN OLA",
+    ],
+    delivers: ["03"],
+  },
+  {
+    number: "10",
+    title: "Generation via DeepSeek-V4-Flash",
+    italic: "hosted on Featherless. Query-rewrite is cached.",
+    body: "The drafter is deepseek-ai/DeepSeek-V4-Flash served via Featherless. Per-question query rewrites are cached in process, which lowers cost on repeated framings. Per-query answers are not cached today; a localStorage history in the Next.js UI lets the user recall past questions but does not skip the call.",
+    sources: [
+      "src/retrieval/generate.py (MODEL = deepseek-ai/DeepSeek-V4-Flash)",
+      "src/retrieval/query_rewrite.py (in-process cache)",
+      "Featherless · featherless.ai",
+    ],
     delivers: ["06", "01"],
   },
 ];
@@ -191,10 +221,34 @@ interface Receipt {
 }
 
 const RECEIPTS: Receipt[] = [
-  { k: "Q1", label: "Capital income > €30k", body: "Single cite, TVL § 124." },
-  { k: "Q12", label: "Meal voucher VAT", body: "KHO 2025:46 → KVL:004/2024 → Vero ohje." },
-  { k: "Q41", label: "Avainhenkilö, 48 vs 84 months", body: "Rank 100 over rank 55. Finlex wins." },
-  { k: "Cost", label: "Local · hosted · cap", body: "€0.005 · €0.04 · €1 cap." },
+  { k: "Q1", label: "Capital income > €30k", body: "Single cite, TVL § 124. No graph hop. The baseline case." },
+  { k: "Q12", label: "Meal voucher VAT", body: "Three cites: KHO 2025:46, KVL:004/2024, Vero ohje. Two graph hops via cites and interprets." },
+  { k: "Q41", label: "Avainhenkilö 48 vs 84 months", body: "Rank-100 Finlex statute outranks rank-60 Vero kannanotto. Verifier picks Finlex." },
+  { k: "Cost", label: "Local · hosted · brief cap", body: "€0.005 local · €0.04 hosted · €1 brief cap. The cost meter UI is a char-count heuristic, not API billing." },
+];
+
+interface Lesson {
+  k: string;
+  title: string;
+  body: string;
+  source: string;
+}
+
+const LESSONS: Lesson[] = [
+  {
+    k: "01",
+    title: "Mojibake recovered through the graph",
+    body:
+      "About 1.7% of chunks were double-encoded: the HTML sniffer mis-detected UTF-8 as Latin-1 and produced 'päätös → pรครคtรถs'-style chunks in LanceDB. We caught it by tracing RAG hits back to source files, fixed the parse layer to force UTF-8, and re-embedded the affected slice. The graph spine made the recovery surgical, not corpus-wide.",
+    source: "scripts/reingest_corrupted_chunks.py · pipeline/html_utils.py",
+  },
+  {
+    k: "02",
+    title: "Not every tax question is in the law",
+    body:
+      "Eval question N49 asks about the account-number range commonly used for trade receivables and payables (myyntisaamiset / ostovelat) in the Finnish chart of accounts. Our system returned the correct legal answer (no universally binding range exists), which did not match the question-bank reference. The reference traces to KILA practice and platform-specific defaults, not Finlex. Honest UX would surface that the law is silent here and the convention lives elsewhere.",
+    source: "eval/questions.json · question N49",
+  },
 ];
 
 const RESEARCH = [
@@ -202,17 +256,15 @@ const RESEARCH = [
   ["TG-RAG", "Han et al., 2025", "arXiv:2510.13590"],
   ["LRMoo v1.1.1", "IFLA, 2026", "cidoc-crm.org/LRMoo"],
   ["Semantic Finlex", "SeCo Aalto + MoJ", "data.finlex.fi/sparql"],
-  ["Akoma Ntoso", "OASIS LegalDocML", "docs.oasis-open.org"],
   ["Self-RAG", "Asai et al., 2024", "ICLR 2024"],
   ["CRAG", "Yan et al., 2024", "arXiv:2401.15884"],
-  ["DSPy", "Khattab et al., Stanford NLP", "dspy.ai"],
+  ["HyDE", "Gao et al., 2022", "Precise Zero-Shot Dense Retrieval"],
   ["AgenticSimLaw", "Jan 2026", "arXiv:2601.21936"],
   ["Multi-Agent Debate", "Du et al., NeurIPS 2023", "arXiv:2305.14325"],
   ["BGE-M3", "Chen et al., BAAI", "bge-model.com"],
   ["bge-reranker-v2-m3", "BAAI", "bge-model.com"],
   ["ColBERT", "Khattab + Zaharia", "SIGIR 2020"],
   ["RRF", "Cormack et al.", "SIGIR 2009"],
-  ["Sentence-BERT", "Reimers + Gurevych", "EMNLP 2019"],
   ["Voyage voyage-3-large", "Voyage AI", "voyageai.com"],
   ["Anthropic Circuit Tracing", "Anthropic, 2025", "transformer-circuits.pub"],
   ["UN OLA · lex superior", "UN Office of Legal Affairs", "a_cn4_l682.pdf"],
@@ -256,19 +308,20 @@ export default function MethodologyPage() {
             </h1>
             <p
               className="text-on-surface-variant"
-              style={{ maxWidth: "60ch", fontSize: "var(--text-body-lg)" }}
+              style={{ maxWidth: "62ch", fontSize: "var(--text-body-lg)" }}
             >
               <span className="font-mono text-secondary">RAGTAG</span>{" "}
-              (Retrieval Augmented Graph Tax Answer Generator) answers
-              Finnish tax questions with full citations across Finlex,
-              Vero, and KHO case law. Every choice below is tagged to
-              either a paper or a numbered point from Taxxa&rsquo;s team
-              chat. We will present the demo live.
+              (Retrieval Augmented Graph Tax Answer Generator) takes a tax
+              question, retrieves the relevant Finnish statutes, court
+              rulings and Vero guidance, and answers with citations. Every
+              decision below is tagged either to a paper or to a numbered
+              point from Taxxa&rsquo;s team chat on 23.05. We will present
+              the demo live.
             </p>
           </div>
         </section>
 
-        {/* Chat — the spine */}
+        {/* Chat */}
         <section className="grid grid-cols-1 md:grid-cols-12" style={{ gap: "var(--space-5)" }}>
           <div className="md:col-span-2">
             <p
@@ -311,7 +364,7 @@ export default function MethodologyPage() {
                   </div>
                   <p
                     className="italic text-on-surface-variant"
-                    style={{ fontSize: "var(--text-body-sm)", lineHeight: 1.5 }}
+                    style={{ fontSize: "var(--text-body)", lineHeight: 1.5 }}
                   >
                     &ldquo;{p.quote}&rdquo;
                   </p>
@@ -331,7 +384,7 @@ export default function MethodologyPage() {
         <PartHeader
           part="Part II"
           title="RAGTAG."
-          italic="Nine pieces. Each answers a chat point."
+          italic="Ten pieces. Each cites file paths or papers."
           insightMarker
         />
         {SHIPPED.map((c) => (
@@ -349,14 +402,14 @@ export default function MethodologyPage() {
             </p>
           </div>
           <div
-            className="md:col-span-10 grid grid-cols-2 sm:grid-cols-4 border-t border-outline-variant"
+            className="md:col-span-10 grid grid-cols-1 sm:grid-cols-2 border-t border-outline-variant"
             style={{ paddingTop: "var(--space-4)", gap: "var(--space-3)" }}
           >
             {RECEIPTS.map((r) => (
               <div
                 key={r.k}
                 className="border border-outline-variant bg-surface-container-lowest"
-                style={{ paddingInline: "var(--space-3)", paddingBlock: "var(--space-3)" }}
+                style={{ paddingInline: "var(--space-4)", paddingBlock: "var(--space-3)" }}
               >
                 <div
                   className="font-serif text-primary"
@@ -372,9 +425,62 @@ export default function MethodologyPage() {
                 </div>
                 <p
                   className="text-on-surface"
-                  style={{ marginTop: 6, fontSize: "var(--text-body-sm)", lineHeight: 1.5 }}
+                  style={{ marginTop: 6, fontSize: "var(--text-body-sm)", lineHeight: 1.55 }}
                 >
                   {r.body}
+                </p>
+              </div>
+            ))}
+          </div>
+        </section>
+
+        {/* Lessons from the corpus */}
+        <section className="grid grid-cols-1 md:grid-cols-12" style={{ gap: "var(--space-5)" }}>
+          <div className="md:col-span-2">
+            <p
+              className="font-mono uppercase tracking-widest text-secondary"
+              style={{ fontSize: "var(--text-overline)" }}
+            >
+              From the corpus
+            </p>
+            <p
+              className="font-mono uppercase tracking-widest text-on-surface-variant"
+              style={{ marginTop: 6, fontSize: "var(--text-overline)" }}
+            >
+              two things we found
+            </p>
+          </div>
+          <div
+            className="md:col-span-10 grid grid-cols-1 sm:grid-cols-2 border-t border-outline-variant"
+            style={{ paddingTop: "var(--space-4)", gap: "var(--space-3)" }}
+          >
+            {LESSONS.map((l) => (
+              <div
+                key={l.k}
+                className="border border-outline-variant bg-surface-container-lowest"
+                style={{ paddingInline: "var(--space-4)", paddingBlock: "var(--space-4)" }}
+              >
+                <h3
+                  className="font-serif font-medium text-primary"
+                  style={{ fontSize: "var(--text-h4)", lineHeight: 1.2 }}
+                >
+                  {l.title}
+                </h3>
+                <p
+                  className="text-on-surface"
+                  style={{
+                    marginTop: 6,
+                    fontSize: "var(--text-body-sm)",
+                    lineHeight: 1.55,
+                  }}
+                >
+                  {l.body}
+                </p>
+                <p
+                  className="font-mono uppercase tracking-widest text-on-surface-variant"
+                  style={{ marginTop: 10, fontSize: "var(--text-overline)" }}
+                >
+                  source · {l.source}
                 </p>
               </div>
             ))}
