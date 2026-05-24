@@ -244,7 +244,8 @@ def build_orbit(
             }
         )
 
-    # Edges between assembled sources — same rule the LLM prompt uses.
+    # Edges between assembled sources — wider type set than the LLM prompt
+    # uses (see ORBIT_EDGE_TYPES comment).
     edges: list[dict[str, Any]] = []
     seen_edge: set[tuple[str, str, str]] = set()
     for src in context.sources:
@@ -253,17 +254,23 @@ def build_orbit(
             edge_types=list(ORBIT_EDGE_TYPES),
             direction="both",
         )
+        parent_of_left = _MAX_PARENT_OF_PER_SOURCE
         for nbr in neighbors:
             target_chunk = section_to_chunk.get(nbr.node_id)
             if target_chunk is None or target_chunk == src.chunk_id:
                 continue
+            etype = nbr.edge.type
+            if etype == "parent_of":
+                if parent_of_left <= 0:
+                    continue
+                parent_of_left -= 1
             outgoing = nbr.direction == "out"
             a, b = (src.chunk_id, target_chunk) if outgoing else (target_chunk, src.chunk_id)
-            key = (a, b, nbr.edge.type)
+            key = (a, b, etype)
             if key in seen_edge:
                 continue
             seen_edge.add(key)
-            edges.append({"source": a, "target": b, "relation": nbr.edge.type})
+            edges.append({"source": a, "target": b, "relation": etype})
 
     return nodes, edges, source_by_chunk
 
@@ -309,20 +316,73 @@ def rewrite_citations(answer: str, context: AssembledContext) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Cost estimate — placeholder until the LLM call returns usage tokens.
+# Cost estimate — DeepSeek V4 Pro
 # ---------------------------------------------------------------------------
 
+# Published DeepSeek V4 Pro pricing (USD per 1 million tokens).
+# Cache-hit pricing is wildly cheaper but we don't yet pass the cache
+# flag back from generate(), so the meter assumes cache-miss to stay
+# conservative for the live cost display.
+_DEEPSEEK_V4_PRO_INPUT_USD_PER_MTOK_MISS = 0.435
+_DEEPSEEK_V4_PRO_INPUT_USD_PER_MTOK_HIT = 0.003625
+_DEEPSEEK_V4_PRO_OUTPUT_USD_PER_MTOK = 0.87
 
-def estimate_cost_cents(answer: str, context: AssembledContext) -> float:
-    """Rough cost in cents. Used for the live cost meter only; not billing.
+# Chars-per-token heuristic. English averages ~4, Finnish closer to ~3
+# because of agglutinative morphology; we land in the middle so the
+# estimate doesn't lie either way. Coarse — fine for a meter, not for
+# billing reconciliation.
+_CHARS_PER_TOKEN = 3.8
 
-    Token estimate: ~4 chars per token, +1k for the system prompt. Cost-per-
-    1k input tokens at $0.00007 (DeepSeek-V4-Flash pricing as of 2026-01).
+# A typical empty-prompt overhead (system prompt + USER_PROMPT_TEMPLATE
+# scaffolding + role tokens). We snapshot the system prompt length once
+# at import time so the cost meter doesn't dip into the LLM module on
+# every call. ``src.retrieval.generate.SYSTEM_PROMPT`` is currently ~1.9k
+# chars — well under the few-token noise floor of the estimate anyway.
+try:
+    from src.retrieval.generate import SYSTEM_PROMPT as _SYSTEM_PROMPT
+    _SYSTEM_PROMPT_CHARS = len(_SYSTEM_PROMPT)
+except Exception:  # pragma: no cover — generate.py shouldn't fail to import
+    _SYSTEM_PROMPT_CHARS = 1900
+
+_USER_TEMPLATE_OVERHEAD_CHARS = 32  # "Question: ...\n\nSources:\n...\n\nAnswer:"
+
+
+def estimate_cost_cents(
+    answer: str,
+    context: AssembledContext,
+    *,
+    question: str = "",
+    cache_hit: bool = False,
+) -> float:
+    """Return the rough USD-cents cost of one DeepSeek V4 Pro generation.
+
+    Counts the characters the model actually saw (system prompt + user
+    template + question + assembled context) plus the characters of the
+    streamed answer, divides by ``_CHARS_PER_TOKEN`` to get a token
+    estimate, then applies the DeepSeek V4 Pro pricing the user supplied:
+
+        $0.003625 / 1M input tokens (cache hit)
+        $0.435    / 1M input tokens (cache miss)   ← default
+        $0.870    / 1M output tokens
+
+    Result is shown on the UI cost meter; not billing-grade.
     """
-    in_chars = len(context.text) + 1000
+    in_chars = (
+        _SYSTEM_PROMPT_CHARS
+        + _USER_TEMPLATE_OVERHEAD_CHARS
+        + len(question or "")
+        + len(context.text)
+    )
     out_chars = len(answer)
-    in_tokens = in_chars / 4
-    out_tokens = out_chars / 4
-    # $0.07 per 1M input, $0.28 per 1M output → cents ≈ usd * 100.
-    cents = (in_tokens * 0.00007 + out_tokens * 0.00028) / 10.0
-    return round(max(cents, 0.01), 3)
+    in_tokens = in_chars / _CHARS_PER_TOKEN
+    out_tokens = out_chars / _CHARS_PER_TOKEN
+    in_price = (
+        _DEEPSEEK_V4_PRO_INPUT_USD_PER_MTOK_HIT
+        if cache_hit
+        else _DEEPSEEK_V4_PRO_INPUT_USD_PER_MTOK_MISS
+    )
+    usd = (
+        in_tokens * in_price / 1_000_000
+        + out_tokens * _DEEPSEEK_V4_PRO_OUTPUT_USD_PER_MTOK / 1_000_000
+    )
+    return round(usd * 100, 4)

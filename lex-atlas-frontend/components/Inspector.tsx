@@ -60,6 +60,13 @@ const RELATION_DESC: Record<EdgeRelation, string> = {
   applies_in:      "Node --> Jurisdiction. Applies in this jurisdiction (FI / EU / Aaland).",
   excludes:        "Node --> Node. Explicit exclusion from scope.",
   in_theme:        "Node --> Theme. SAT-Graph curated structural community.",
+  // ── DB-native edge types ─────────────────────────────────────────────
+  parent_of:       "LAW --> SECTION. Structural containment in the source document.",
+  cites:           "SECTION --> SECTION. Textual cross-reference (\"see §117\") between two sections.",
+  amends:          "Amendment LAW --> target LAW. The amending act modifies the target's text.",
+  amends_section:  "Amendment block --> SECTION. One operative directive (muutetaan / kumotaan / lisätään) targets this section.",
+  repeals:         "Amendment Action --> SECTION/LAW. The section or whole act is repealed effective the amendment's date.",
+  applies:         "Case --> Statute. The court ruling applied this statutory provision to the case at hand.",
 };
 
 export function Inspector() {

@@ -539,7 +539,7 @@ async def _ask_stream(body: AskBody, request: Request) -> AsyncIterator[bytes]:
             await asyncio.sleep(delay)
 
     timings["total"] = _ms_since(t_total)
-    cents = estimate_cost_cents(gen.answer, context)
+    cents = estimate_cost_cents(gen.answer, context, question=body.question)
 
     # Cost meter + done.
     yield _sse({"type": "cost", "cents": cents})

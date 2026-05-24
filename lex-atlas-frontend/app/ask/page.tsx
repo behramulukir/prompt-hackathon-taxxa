@@ -26,6 +26,7 @@ import { LawTimeline } from "@/components/LawTimeline";
 import { HistoryButton, HistoryList } from "@/components/HistoryList";
 import { useGraphStore } from "@/lib/store";
 import { useQueryHistory, type HistoryEntry } from "@/lib/history";
+import { formatCents } from "@/lib/utils";
 
 const PROMPTS = [
   {
@@ -439,16 +440,11 @@ export default function AskPage() {
                     >
                       Synthesis &amp; Resolution
                     </span>
-                    <span
-                      className="meta-pill ml-auto"
-                      style={
-                        phase === "done"
-                          ? { color: "var(--color-secondary)", borderColor: "var(--color-secondary)" }
-                          : undefined
-                      }
-                    >
-                      {phase === "done" ? "Confidence: High" : "Streaming..."}
-                    </span>
+                    {/* Status / cost pill — visible while streaming and
+                        flips to the final cost once the agent emits ``done``.
+                        Replaces the "Confidence: High" plank, which was a
+                        canned claim the pipeline doesn't actually compute. */}
+                    <AnswerStatusPill phase={phase} />
                   </div>
 
                   {/* Progressive loading indicator above the answer. */}
@@ -467,40 +463,42 @@ export default function AskPage() {
                     />
                   </div>
 
-                  <div className="mt-6 flex gap-3 overflow-x-auto border-t border-outline-variant pb-2 pt-4">
-                    <button className="flex shrink-0 items-center gap-2 border border-outline-variant px-3 py-1.5 font-mono text-xs transition-colors hover:bg-surface-container">
-                      <span className="material-symbols-outlined" style={{ fontSize: 16 }}>
-                        draft
+                  {/* Action strip. Notes for future edits:
+                      - ``overflow-x-auto`` is intentionally NOT used here. It
+                        clips the History dropdown (which is absolute-
+                        positioned), which is why History silently broke when
+                        we previously had three buttons forcing horizontal
+                        scroll. Stay on a single line.
+                      - "Draft Memo" / "Share Citation" were stubbed-out
+                        affordances; removed until they wire to real handlers.
+                      - "New Query" is the primary action (most reached-for
+                        button), so it's filled (btn-primary) and on the
+                        left — first thing the eye lands on. */}
+                  <div className="mt-6 flex flex-wrap items-center gap-3 border-t border-outline-variant pb-2 pt-4">
+                    <button
+                      onClick={() => {
+                        setSubmitted(null);
+                        setQuestion("");
+                        reset();
+                      }}
+                      className="btn-primary btn-sm shrink-0"
+                    >
+                      <span className="material-symbols-outlined" style={{ fontSize: "var(--icon-sm)" }}>
+                        refresh
                       </span>
-                      Draft Memo
+                      New Query
                     </button>
-                    <button className="flex shrink-0 items-center gap-2 border border-outline-variant px-3 py-1.5 font-mono text-xs transition-colors hover:bg-surface-container">
-                      <span className="material-symbols-outlined" style={{ fontSize: 16 }}>
-                        share
-                      </span>
-                      Share Citation
-                    </button>
-                    <div className="ml-auto flex shrink-0 items-center gap-3">
-                      <HistoryButton
-                        entries={historyEntries}
-                        onRecall={recall}
-                        onRemove={removeHistory}
-                        onClear={clearHistory}
-                      />
-                      <button
-                        onClick={() => {
-                          setSubmitted(null);
-                          setQuestion("");
-                          reset();
-                        }}
-                        className="flex shrink-0 items-center gap-2 border border-outline-variant px-3 py-1.5 font-mono text-xs text-on-surface-variant transition-colors hover:bg-surface-container hover:text-on-surface"
-                      >
-                        <span className="material-symbols-outlined" style={{ fontSize: 16 }}>
-                          refresh
-                        </span>
-                        New Query
-                      </button>
-                    </div>
+                    <HistoryButton
+                      entries={historyEntries}
+                      onRecall={recall}
+                      onRemove={removeHistory}
+                      onClear={clearHistory}
+                    />
+                    {/* Cost readout — also surfaced as a pill at the top of
+                        the card, but having it pinned to the action strip
+                        makes the per-query economics visible after the
+                        answer is read. */}
+                    <AnswerCostReadout className="ml-auto" />
                   </div>
                 </div>
               </div>
@@ -712,6 +710,58 @@ export default function AskPage() {
       <Inspector />
       <Footer />
     </main>
+  );
+}
+
+/** Pill at the top-right of the synthesis card. While the agent is
+ *  working, shows "Streaming…". On done, shows the cost. The previous
+ *  copy ("Confidence: High") was a hard-coded claim the pipeline doesn't
+ *  compute — replacing it with cost surfaces a real signal in the same
+ *  visual slot. */
+function AnswerStatusPill({ phase }: { phase: string }) {
+  const cents = useGraphStore((s) => s.costCents);
+  const done = phase === "done";
+  if (!done) {
+    return <span className="meta-pill ml-auto">Streaming…</span>;
+  }
+  return (
+    <span
+      className="meta-pill ml-auto"
+      style={{
+        color: "var(--color-secondary)",
+        borderColor: "var(--color-secondary)",
+      }}
+      title="Estimated cost of the DeepSeek call for this query"
+    >
+      {cents > 0 ? formatCents(cents) : "Done"}
+    </span>
+  );
+}
+
+/** Cost label sitting in the action strip under the answer. Stays low-key
+ *  until the agent finishes, then shows the final cents. Pinned to the
+ *  right via ``ml-auto`` from the caller. */
+function AnswerCostReadout({ className }: { className?: string }) {
+  const cents = useGraphStore((s) => s.costCents);
+  if (cents <= 0) return null;
+  return (
+    <div
+      className={
+        "flex items-baseline gap-2 font-mono text-on-surface-variant " +
+        (className ?? "")
+      }
+      title="DeepSeek V4 Pro · estimated from input+output tokens, cache-miss price"
+    >
+      <span
+        className="uppercase tracking-wider"
+        style={{ fontSize: "var(--text-overline)" }}
+      >
+        cost
+      </span>
+      <span style={{ fontSize: "var(--text-body-sm)", color: "var(--color-on-surface)" }}>
+        {formatCents(cents)}
+      </span>
+    </div>
   );
 }
 

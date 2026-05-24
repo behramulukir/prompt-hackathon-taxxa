@@ -93,6 +93,13 @@ const RELATION_LABEL: Record<EdgeRelation, string> = {
   applies_in: "in",
   excludes: "excludes",
   in_theme: "theme",
+  // ── DB-native edge types from the Python pipeline ────────────────────
+  parent_of: "has §",
+  cites: "cites",
+  amends: "amends",
+  amends_section: "amends §",
+  repeals: "repeals",
+  applies: "applies",
 };
 
 /* ────────────────────────────────────────────────────────────────────────
@@ -237,7 +244,9 @@ export function OrbitGraph() {
   const setHoveredEdgeKey = useGraphStore((s) => s.setHoveredEdgeKey);
   const setHoverAnchor = useGraphStore((s) => s.setHoverAnchor);
   const setSelectedNodeId = useGraphStore((s) => s.setSelectedNodeId);
-  const setSelectedEdgeKey = useGraphStore((s) => s.setSelectedEdgeKey);
+  // ``setSelectedEdgeKey`` was used for click-to-pin edges; edges are now
+  // hover-only (the Inspector for edges is still reachable via URL
+  // ?inspect=edge:... or programmatic flows in page.tsx).
   const selectedNodeId = useGraphStore((s) => s.selectedNodeId);
   const selectedEdgeKey = useGraphStore((s) => s.selectedEdgeKey);
   const asof = useGraphStore((s) => s.asof);
@@ -467,7 +476,7 @@ export function OrbitGraph() {
               <g
                 key={`e-${i}`}
                 opacity={dim ? 0.08 : 1}
-                style={{ cursor: "pointer", transition: "opacity 180ms ease" }}
+                style={{ cursor: "default", transition: "opacity 180ms ease" }}
                 onMouseEnter={(ev) => {
                   setHoveredEdgeKey(edgeKey);
                   // Compute a tight bounding rect AROUND the edge segment so
@@ -494,19 +503,21 @@ export function OrbitGraph() {
                   setHoveredEdgeKey(null);
                   setHoverAnchor(null);
                 }}
-                onClick={(ev) => {
-                  ev.stopPropagation();
-                  setSelectedEdgeKey(edgeKey);
-                }}
+                /* Edges intentionally have no onClick — they're informational
+                   only. The arrow markerEnd below carries direction; clicking
+                   them used to open the Inspector but that surfaced too many
+                   layout-scaffolding edges with no real metadata. */
               >
-                {/* Wide invisible hit-line for easy clicking */}
+                {/* Hover hit-line: thinner than before (was 14) so the hover
+                    surface still covers a comfortable area but doesn't read
+                    as a clickable target. */}
                 <line
                   x1={s.x}
                   y1={s.y}
                   x2={t.x}
                   y2={t.y}
                   stroke="transparent"
-                  strokeWidth={14}
+                  strokeWidth={8}
                 />
                 <line
                   x1={s.x}

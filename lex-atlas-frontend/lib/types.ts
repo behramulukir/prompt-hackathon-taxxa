@@ -19,7 +19,15 @@ export type NodeKind =
   | "jurisdiction" // FI, EU, Åland
   | "theme";      // SAT-Graph §3.6 curated structural community
 
-/** Edge relations — all carry bitemporal (t_valid, t_invalid) on the wire. */
+/** Edge relations — all carry bitemporal (t_valid, t_invalid) on the wire.
+ *  The list mixes two vocabularies on purpose:
+ *    - LRMoo-style names (has_part / realized_in / creates / …) for the
+ *      ontology layer the demo speaks publicly,
+ *    - Backend-native SQL types (parent_of / cites / amends / applies /
+ *      repeals / amends_section) the Python pipeline emits directly off
+ *      ``src.models.EdgeType``.
+ *  Keeping both means we can render whichever the agent sent without a
+ *  lossy server-side mapping. */
 export type EdgeRelation =
   | "has_part"
   | "realized_in"
@@ -40,7 +48,14 @@ export type EdgeRelation =
   | "issued_by"
   | "applies_in"
   | "excludes"
-  | "in_theme";
+  | "in_theme"
+  // ── DB-native names the Python pipeline emits ───────────────────────
+  | "parent_of"      // structural containment (LAW → SECTION etc.)
+  | "cites"          // textual cross-reference between sections
+  | "amends"         // amendment LAW → target LAW
+  | "amends_section" // amendment block → specific SECTION
+  | "repeals"        // amendment Action that nullifies a section
+  | "applies";       // KHO/KVL case applies a statutory provision
 
 /** Authority priority lattice — higher rank wins on conflict resolution. */
 export type AuthorityRank = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8;
