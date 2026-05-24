@@ -28,6 +28,7 @@ from src.retrieval.assemble import AssembledContext, assemble
 from src.retrieval.caveats import build_amendment_caveats
 from src.retrieval.filters import infer_filters
 from src.retrieval.generate import Generation, generate
+from src.retrieval.query_rewrite import ExpandedQuery, expand_query
 from src.retrieval.rerank import RerankedHit, rerank
 from src.retrieval.vector_retriever import VectorRetriever
 
@@ -45,9 +46,13 @@ class Pipeline:
         *,
         vector_db_path: str | Path,
         graph_db_path: str | Path = "output/graph.db",
+        query_rewrite: bool = True,
     ) -> None:
         self.vector_db_path = str(vector_db_path)
         self.graph_db_path = str(graph_db_path)
+        # ``query_rewrite`` toggles Plan A's LLM expansion. Default on;
+        # the eval / A/B harness can disable it by passing False.
+        self.query_rewrite = query_rewrite
         self.retriever = VectorRetriever(self.vector_db_path)
         self.graph = GraphStore(self.graph_db_path)
 
@@ -68,15 +73,34 @@ class Pipeline:
         t_total = time.perf_counter()
 
         # 1. Filters --------------------------------------------------------
+        # Filter inference runs on the ORIGINAL question — the user's
+        # actual intent shouldn't be diluted by the LLM rewrite.
         t = time.perf_counter()
         filters = infer_filters(question)
         if extra_filters:
             filters = {**filters, **extra_filters}
         timings["filter_infer"] = _ms_since(t)
 
+        # 1b. Query rewrite -------------------------------------------------
+        # Plan A — one short LLM call to add Finnish equivalents and
+        # likely document-type signals before retrieval. Soft-fails to
+        # the original question on any LLM error. See
+        # ``src/retrieval/query_rewrite.py`` for the design notes.
+        if self.query_rewrite:
+            t = time.perf_counter()
+            expanded: ExpandedQuery = expand_query(question)
+            timings["query_rewrite"] = _ms_since(t)
+            retrieval_query = expanded.expanded
+        else:
+            expanded = ExpandedQuery(
+                original=question, expanded=question,
+                finnish_keywords=(), year=None, cached=False,
+            )
+            retrieval_query = question
+
         # 2. Vector retrieve ------------------------------------------------
         t = time.perf_counter()
-        hits = self.retriever.retrieve(question, k=k, filters=filters or None)
+        hits = self.retriever.retrieve(retrieval_query, k=k, filters=filters or None)
         timings["vector_retrieve"] = _ms_since(t)
 
         # 3. Rerank ---------------------------------------------------------
@@ -121,6 +145,7 @@ class Pipeline:
             applied_filters=filters,
             timings=timings,
             amendment_caveats=amendment_caveats,
+            expanded=expanded,
         )
 
     def close(self) -> None:
@@ -135,11 +160,19 @@ class Pipeline:
 _pipeline: Pipeline | None = None
 
 
-def get_pipeline(vector_db_path: str | Path) -> Pipeline:
-    """Process-singleton pipeline. The path is honored only on first call."""
+def get_pipeline(
+    vector_db_path: str | Path,
+    query_rewrite: bool = True,
+) -> Pipeline:
+    """Process-singleton pipeline. The path is honored only on first call;
+    ``query_rewrite`` is honored on first call and on flag change (the
+    singleton is rebuilt when the toggle flips so A/B comparisons get a
+    clean retriever each time)."""
     global _pipeline
-    if _pipeline is None:
-        _pipeline = Pipeline(vector_db_path=vector_db_path)
+    if _pipeline is None or _pipeline.query_rewrite != query_rewrite:
+        _pipeline = Pipeline(
+            vector_db_path=vector_db_path, query_rewrite=query_rewrite
+        )
     return _pipeline
 
 
@@ -150,9 +183,10 @@ def answer(
     k: int = DEFAULT_RETRIEVE_K,
     n: int = DEFAULT_CONTEXT_N,
     extra_filters: dict[str, Any] | None = None,
+    query_rewrite: bool = True,
 ) -> AnswerResult:
     """Convenience: open a pipeline (cached) and run one question."""
-    return get_pipeline(vector_db_path).answer(
+    return get_pipeline(vector_db_path, query_rewrite).answer(
         question, k=k, n=n, extra_filters=extra_filters
     )
 
@@ -175,6 +209,7 @@ def _build_answer_result(
     applied_filters: dict[str, Any],
     timings: dict[str, int],
     amendment_caveats: list[AmendmentCaveat] | None = None,
+    expanded: ExpandedQuery | None = None,
 ) -> AnswerResult:
     """Compose the AnswerResult contract.
 
@@ -210,6 +245,11 @@ def _build_answer_result(
     lang = applied_filters.get("language")
     if lang:
         assumptions.append(f"Restricted to language={lang}.")
+    if expanded is not None and expanded.finnish_keywords:
+        kw = ", ".join(expanded.finnish_keywords[:4])
+        assumptions.append(
+            f"Query expanded with Finnish keywords: {kw}."
+        )
 
     return AnswerResult(
         question=question,

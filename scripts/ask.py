@@ -55,6 +55,17 @@ def main() -> int:
     )
     p.add_argument("-k", type=int, default=20, help="v1 vector retrieval depth (ignored in v2 — strategy.seed_k controls).")
     p.add_argument("-n", type=int, default=8, help="Sources in assembled context.")
+    p.add_argument(
+        "--no-rewrite",
+        action="store_true",
+        help=(
+            "Disable Plan A's LLM query expansion. Default behavior runs "
+            "one short LLM call that adds Finnish equivalents + likely "
+            "document-type signals before retrieval. Pass this flag for "
+            "A/B comparisons or when the rewrite is regressing on a "
+            "specific question."
+        ),
+    )
     p.add_argument("--verbose", "-v", action="store_true", help="Show retrieved chunks, scores, and context.")
     p.add_argument("--json", action="store_true", help="Emit the AnswerResult as JSON.")
     args = p.parse_args()
@@ -62,7 +73,11 @@ def main() -> int:
     if args.v2:
         return _run_v2(args)
 
-    pipe = Pipeline(vector_db_path=args.db, graph_db_path=args.graph_db)
+    pipe = Pipeline(
+        vector_db_path=args.db,
+        graph_db_path=args.graph_db,
+        query_rewrite=not args.no_rewrite,
+    )
 
     # Reach into the pipeline once to grab the intermediate state when verbose,
     # otherwise the public answer() path is fine.
@@ -73,11 +88,25 @@ def main() -> int:
         from src.retrieval.rerank import rerank
 
         filters = infer_filters(args.question)
-        hits = pipe.retriever.retrieve(args.question, k=args.k, filters=filters or None)
+        if not args.no_rewrite:
+            from src.retrieval.query_rewrite import expand_query
+            expanded_v1 = expand_query(args.question)
+            retrieval_query_v1 = expanded_v1.expanded
+        else:
+            expanded_v1 = None
+            retrieval_query_v1 = args.question
+        hits = pipe.retriever.retrieve(retrieval_query_v1, k=args.k, filters=filters or None)
         reranked = rerank(args.question, hits)
         ctx = assemble(reranked, graph=pipe.graph, n=args.n)
         gen = generate(args.question, ctx)
 
+        if expanded_v1 is not None and expanded_v1.expanded != args.question:
+            _print_block(
+                "QUERY REWRITE",
+                f"expanded: {expanded_v1.expanded}\n"
+                f"finnish_keywords: {list(expanded_v1.finnish_keywords)}\n"
+                f"year: {expanded_v1.year}  cached: {expanded_v1.cached}",
+            )
         _print_block("INFERRED FILTERS", json.dumps(filters, indent=2))
         _print_block(
             "RERANKED HITS (top 10)",
@@ -125,6 +154,7 @@ def _run_v2(args) -> int:
         vector_db_path=args.db,
         graph_db_path=args.graph_db,
         rerank_mode=args.rerank,
+        query_rewrite=not args.no_rewrite,
     )
 
     if args.verbose:
@@ -170,7 +200,16 @@ def _run_v2_verbose(args, pipe) -> int:
 
     strategy = pick_strategy(args.question)
     filters = infer_filters(args.question)
-    seeds = pipe.retriever.retrieve(args.question, k=strategy.seed_k, filters=filters or None)
+    # Mirror PipelineV2.answer: route + filter on the original question,
+    # retrieve with the expanded query if Plan A is enabled.
+    if not args.no_rewrite:
+        from src.retrieval.query_rewrite import expand_query
+        expanded = expand_query(args.question)
+        retrieval_query = expanded.expanded
+    else:
+        expanded = None
+        retrieval_query = args.question
+    seeds = pipe.retriever.retrieve(retrieval_query, k=strategy.seed_k, filters=filters or None)
     seed_section_ids: list[str] = []
     seen: set[str] = set()
     for h in seeds:
@@ -242,6 +281,13 @@ def _run_v2_verbose(args, pipe) -> int:
         f"seed_k={strategy.seed_k}  max_nodes={strategy.max_nodes}  "
         f"rerank_mode={args.rerank}",
     )
+    if expanded is not None and expanded.expanded != args.question:
+        _print_block(
+            "QUERY REWRITE",
+            f"expanded: {expanded.expanded}\n"
+            f"finnish_keywords: {list(expanded.finnish_keywords)}\n"
+            f"year: {expanded.year}  cached: {expanded.cached}",
+        )
     _print_block("INFERRED FILTERS", json.dumps(filters, indent=2))
     _print_block(
         "GRAPH EXPANSION",

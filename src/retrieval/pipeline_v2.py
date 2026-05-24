@@ -50,6 +50,7 @@ from src.retrieval.cross_encoder_rerank import (
 from src.retrieval.filters import infer_filters
 from src.retrieval.generate import Generation, generate
 from src.retrieval.graph_expand import ExpansionStrategy, expand
+from src.retrieval.query_rewrite import ExpandedQuery, expand_query
 from src.retrieval.rerank import RerankedHit, rerank as metadata_rerank
 from src.retrieval.strategy import pick_strategy
 from src.retrieval.vector_retriever import RetrievedHit, VectorRetriever, _row_to_hit
@@ -80,10 +81,15 @@ class PipelineV2:
         graph_db_path: str | Path = "output/graph.db",
         rerank_mode: RerankMode = DEFAULT_RERANK_MODE,
         load_cross_encoder_eagerly: bool = False,
+        query_rewrite: bool = True,
     ) -> None:
         self.vector_db_path = str(vector_db_path)
         self.graph_db_path = str(graph_db_path)
         self.rerank_mode: RerankMode = rerank_mode
+        # Plan A — LLM query expansion before retrieval. Default on; the
+        # eval / A-B harness can disable via constructor or via the
+        # ``--no-rewrite`` CLI flag (passed through scripts.ask).
+        self.query_rewrite = query_rewrite
         self.retriever = VectorRetriever(self.vector_db_path)
         self.vector_store = self.retriever.store  # reuse same LanceDB connection
         self.graph = GraphStore(self.graph_db_path)
@@ -113,21 +119,42 @@ class PipelineV2:
         t_total = time.perf_counter()
 
         # 1. Strategy router -------------------------------------------------
+        # Router reads the ORIGINAL question — the LLM rewrite may
+        # mention domain terms the user didn't and would noise up the
+        # strategy decision.
         t = time.perf_counter()
         strategy = strategy_override or pick_strategy(question)
         timings["strategy_pick"] = _ms_since(t)
 
         # 2. Filters ---------------------------------------------------------
+        # Same rationale — filters reflect user intent, not the rewrite.
         t = time.perf_counter()
         filters = infer_filters(question)
         if extra_filters:
             filters = {**filters, **extra_filters}
         timings["filter_infer"] = _ms_since(t)
 
+        # 2b. Query rewrite --------------------------------------------------
+        # Plan A — see ``src/retrieval/query_rewrite.py``. Adds Finnish
+        # equivalents + likely document-type signals to the retrieval
+        # query so the dense + sparse backends both see a richer match
+        # surface. Soft-fails to the original question on any LLM error.
+        if self.query_rewrite:
+            t = time.perf_counter()
+            expanded: ExpandedQuery = expand_query(question)
+            timings["query_rewrite"] = _ms_since(t)
+            retrieval_query = expanded.expanded
+        else:
+            expanded = ExpandedQuery(
+                original=question, expanded=question,
+                finnish_keywords=(), year=None, cached=False,
+            )
+            retrieval_query = question
+
         # 3. Vector seeds ----------------------------------------------------
         t = time.perf_counter()
         seeds: list[RetrievedHit] = self.retriever.retrieve(
-            question, k=strategy.seed_k, filters=filters or None
+            retrieval_query, k=strategy.seed_k, filters=filters or None
         )
         timings["vector_retrieve"] = _ms_since(t)
 
@@ -236,6 +263,7 @@ class PipelineV2:
             applied_filters=filters,
             timings=timings,
             amendment_caveats=amendment_caveats,
+            expanded=expanded,
         )
 
     def close(self) -> None:
@@ -253,13 +281,24 @@ _pipeline_v2: PipelineV2 | None = None
 def get_pipeline_v2(
     vector_db_path: str | Path,
     rerank_mode: RerankMode = DEFAULT_RERANK_MODE,
+    query_rewrite: bool = True,
 ) -> PipelineV2:
-    """Process-singleton v2 pipeline. Path + rerank_mode honored only on first
-    call — switching modes mid-process requires resetting ``_pipeline_v2``.
+    """Process-singleton v2 pipeline. Path + rerank_mode + query_rewrite
+    honored only on first call — switching mid-process requires
+    resetting ``_pipeline_v2``.
     """
     global _pipeline_v2
-    if _pipeline_v2 is None or _pipeline_v2.rerank_mode != rerank_mode:
-        _pipeline_v2 = PipelineV2(vector_db_path=vector_db_path, rerank_mode=rerank_mode)
+    needs_new = (
+        _pipeline_v2 is None
+        or _pipeline_v2.rerank_mode != rerank_mode
+        or _pipeline_v2.query_rewrite != query_rewrite
+    )
+    if needs_new:
+        _pipeline_v2 = PipelineV2(
+            vector_db_path=vector_db_path,
+            rerank_mode=rerank_mode,
+            query_rewrite=query_rewrite,
+        )
     return _pipeline_v2
 
 
@@ -271,9 +310,10 @@ def answer_v2(
     n: int = DEFAULT_CONTEXT_N,
     extra_filters: dict[str, Any] | None = None,
     strategy_override: ExpansionStrategy | None = None,
+    query_rewrite: bool = True,
 ) -> AnswerResult:
     """Convenience: open a v2 pipeline (cached) and run one question."""
-    return get_pipeline_v2(vector_db_path, rerank_mode).answer(
+    return get_pipeline_v2(vector_db_path, rerank_mode, query_rewrite).answer(
         question,
         n=n,
         extra_filters=extra_filters,
@@ -510,6 +550,7 @@ def _build_answer_result_v2(
     applied_filters: dict[str, Any],
     timings: dict[str, int],
     amendment_caveats: list[AmendmentCaveat] | None = None,
+    expanded: ExpandedQuery | None = None,
 ) -> AnswerResult:
     """Compose the AnswerResult for v2. ``retrieval_paths`` keys are chunk_ids
     for vector-anchored sources and node_ids for graph-expanded ones (allowed
@@ -541,6 +582,11 @@ def _build_answer_result_v2(
     lang = applied_filters.get("language")
     if lang:
         assumptions.append(f"Restricted to language={lang}.")
+    if expanded is not None and expanded.finnish_keywords:
+        kw = ", ".join(expanded.finnish_keywords[:4])
+        assumptions.append(
+            f"Query expanded with Finnish keywords: {kw}."
+        )
 
     return AnswerResult(
         question=question,
