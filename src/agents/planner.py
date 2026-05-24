@@ -12,7 +12,7 @@ from . import Plan, SubQuestion, SubQuestionCategory
 from ._llm import LLMError, chat, parse_json_object
 from ._prompts import load
 
-MODEL = "deepseek-ai/DeepSeek-V3"
+MODEL = "deepseek-ai/DeepSeek-V4-Pro"
 SYSTEM_PROMPT = load("planner")
 
 MAX_SUB_QUESTIONS = 4

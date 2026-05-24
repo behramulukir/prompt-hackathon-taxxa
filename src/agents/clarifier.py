@@ -13,7 +13,7 @@ from . import ClarifyResult, MissingDimension
 from ._llm import LLMError, chat, parse_json_object
 from ._prompts import load
 
-MODEL = "deepseek-ai/DeepSeek-V3"
+MODEL = "deepseek-ai/DeepSeek-V4-Pro"
 SYSTEM_PROMPT = load("clarifier")
 
 _VALID_MISSING: frozenset[str] = frozenset({"year", "entity_type", "jurisdiction"})

@@ -19,7 +19,7 @@ from src.models import Edge
 from ._llm import LLMError, chat, parse_json_object
 from ._prompts import load
 
-MODEL = "deepseek-ai/DeepSeek-V3"
+MODEL = "deepseek-ai/DeepSeek-V4-Pro"
 SYSTEM_PROMPT = load("extractor")
 
 _VALID_EDGE_TYPES: frozenset[str] = frozenset(

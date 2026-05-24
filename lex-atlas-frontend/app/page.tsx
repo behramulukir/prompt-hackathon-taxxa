@@ -8,7 +8,6 @@
 
 import Link from "next/link";
 import { Header } from "@/components/Header";
-import { Footer } from "@/components/Footer";
 import { TopologyCanvas } from "@/components/TopologyCanvas";
 
 const PILLARS = [
@@ -70,7 +69,7 @@ export default function LandingPage() {
                   letterSpacing: "-0.02em",
                 }}
               >
-                Agentic GraphRAG
+                RAGTAG
                 <br />
                 <span className="italic text-on-surface-variant">
                   for Finnish tax law.
@@ -84,10 +83,12 @@ export default function LandingPage() {
                   lineHeight: 1.6,
                 }}
               >
-                A continuous multi-agent retrieval and reasoning loop operating
-                over Finlex and Vero guidelines. Lex Atlas synthesizes an
-                authoritative, structured legal topology to resolve complex
-                regulatory conflicts autonomously.
+                <strong>R</strong>etrieval <strong>A</strong>ugmented{" "}
+                <strong>G</strong>raph <strong>T</strong>ax{" "}
+                <strong>A</strong>nswer <strong>G</strong>enerator. A
+                multi-agent retrieval and reasoning loop over Finlex and Vero
+                that walks a typed legal graph to resolve complex regulatory
+                questions with cited answers.
               </p>
             </div>
             <div
@@ -185,8 +186,6 @@ export default function LandingPage() {
           </div>
         </section>
       </div>
-
-      <Footer />
     </main>
   );
 }

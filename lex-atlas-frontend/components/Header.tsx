@@ -15,8 +15,7 @@ export function Header() {
   const path = usePathname() ?? "/";
   const NAV = [
     { href: "/ask", label: "Ask" },
-    { href: "/methodology", label: "Methodology" },
-    { href: "/eval", label: "Eval" },
+    { href: "/about", label: "About" },
   ];
   const isActive = (href: string) =>
     href === "/" ? path === "/" : path === href || path.startsWith(href + "/");
@@ -26,8 +25,9 @@ export function Header() {
       <div className="mx-auto flex h-16 max-w-[1440px] items-center justify-between px-6">
         <Link
           href="/"
-          aria-label="Lex Atlas home"
+          aria-label="RAGTAG home"
           className="flex items-center gap-2 transition-opacity hover:opacity-80"
+          title="Retrieval Augmented Graph Tax Answer Generator"
         >
           <span
             className="material-symbols-outlined filled text-secondary"
@@ -39,7 +39,7 @@ export function Header() {
             className="font-serif text-2xl font-medium uppercase tracking-tight text-on-surface"
             style={{ fontWeight: 500 }}
           >
-            Lex Atlas
+            RAGTAG
           </span>
         </Link>
 

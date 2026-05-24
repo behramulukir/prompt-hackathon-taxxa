@@ -29,12 +29,12 @@ from src.retrieval.assemble import AssembledContext
 
 FEATHERLESS_BASE_URL = "https://api.featherless.ai/v1"
 # Model slug. Featherless typically uses HF-style names — if the exact slug
-# differs (e.g. ``deepseek-ai/DeepSeek-V4-Flash``), update here only.
-MODEL = "deepseek-ai/DeepSeek-V4-Flash"
+# differs, update here only.
+MODEL = "deepseek-ai/DeepSeek-V4-Pro"
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
-DEFAULT_TEMPERATURE = 0.2  # low — we want faithful citation, not creativity
-DEFAULT_MAX_TOKENS = 1200
+DEFAULT_TEMPERATURE = 0.1  # low — we want faithful citation, not creativity
+DEFAULT_MAX_TOKENS = 1800
 
 
 # --------------------------------------------------------------------------
@@ -51,7 +51,7 @@ Rules:
 - Finlex statutes are binding law; Vero guidance is interpretive. If Vero guidance appears to conflict with a Finlex section on the same point, surface the conflict explicitly and explain that the Finlex section prevails.
 - If the sources do not contain enough information to answer, say so plainly. Do not guess, do not draw on outside knowledge.
 - Be specific. Quote thresholds, percentages, and section numbers verbatim from the sources.
-- Keep the answer concise — 3 to 8 sentences for most questions.
+- Keep the answer concise — up to about 10 sentences.
 - When sources are connected (you see "Cites:", "Interpreted by:", "Amended by:" etc. between them), use those relationships to structure your reasoning: e.g. "The general rule is [Source 1], but [Source 1] cites [Source 3] for the exception..."
 - If a prior assistant turn appears in this conversation, treat it as context for the user's follow-up. The Source numbering in the CURRENT turn refers to the CURRENT source list only — never re-cite an old [Source N] number that no longer exists in the current list.
 
@@ -59,6 +59,8 @@ Temporal awareness:
 - Each source header may carry `status=suspect | stale | repealed`, and the block may include `Amendments to parent LAW`, `Interpretations on file`, or `Note:` lines. Read these.
 - If a cited source's status is `suspect`, `stale`, or `repealed`, add a short "Huomioitavaa:" / "Note:" block (one or two sentences) after the answer. Name the source and explain why it might be outdated: e.g. "[Source 3] kuuluu lakiin, johon on tehty 200+ muutosta, joista uusin on voimassa 2025 alkaen — varmista nykytila." Never silently rely on a suspect/stale source.
 - For `repealed` sources, do not present them as current law — describe them as historical and prefer a non-repealed alternative if one is in the sources.
+
+- Always answer in English. For Finnish legal terms, companies, regulations, keep the original Finnish wording (e.g. "osakeyhtiö", "verolaki", "Vero") even if the question is in English. Keep those words italicized. For non-legal terms, match the language of the question (e.g. "company" vs "yhtiö").
 """
 
 
@@ -135,21 +137,26 @@ def parse_citations(answer: str) -> list[int]:
 
 # Patterns the LLM has been observed to lead with even when the system
 # prompt forbids preambles. Stripped at the start of the answer only
-# (the ``^`` anchor matters — temporal "Huomioitavaa:" / "Note:" blocks
+# (the ``\A`` anchor matters — temporal "Huomioitavaa:" / "Note:" blocks
 # the prompt explicitly asks for trail at the END and must survive).
+#
+# Deliberately NOT stripped:
+#   "(a) …" / "(1) …" / "(see Source 2)"  — these are content (section
+#   labels for multi-part questions or inline citations), not preambles.
+#   An earlier version of this list had a generic "\A\s*\([^)\n]+\)\s*"
+#   pattern that ate `(a)` labels and, on nested parens like ``((a))``,
+#   produced ``) The correction…`` (greedy match consumed through the
+#   FIRST ``)``). We rely on header keywords instead — much safer.
 #
 # Tested against:
 #   "<think>Let me check...</think>The answer is..."     → "The answer is..."
-#   "(Note: based on Source 1) Yhtiöt..."                → "Yhtiöt..."
 #   "**Vastaus:** Yhtiöt..."                             → "Yhtiöt..."
 #   "Vastaus: Yhtiöt..."                                 → "Yhtiöt..."
 #   "Based on the sources, Yhtiöt..."                    → "Yhtiöt..."
+#   "(a) The procedure is..."                            → unchanged
 _PREAMBLE_PATTERNS: tuple[re.Pattern[str], ...] = (
     # DeepSeek-style reasoning block — strip the whole <think>…</think>
     re.compile(r"\A\s*<think>.*?</think>\s*", re.DOTALL | re.IGNORECASE),
-    # Leading parenthetical aside ("(Note: …)"). Capped at 200 chars so we
-    # don't accidentally eat a long opening sentence wrapped in parens.
-    re.compile(r"\A\s*\([^)\n]{1,200}\)\s*"),
     # Leading bold header like **Vastaus:** or **Answer:** (with trailing
     # colon, dash, or em-dash — the header form, not a bold first phrase).
     re.compile(
@@ -178,7 +185,7 @@ def _strip_answer_preamble(answer: str) -> str:
     Strips a leading parenthetical / header / reasoning block from the LLM
     output BEFORE rewrite_citations runs. The rule is in the system prompt
     already; this is a defensive cleanup for cases where the model still
-    emits a preface (DeepSeek-V4-Flash has been observed to wrap answers in
+    emits a preface (DeepSeek-V4-Pro has been observed to wrap answers in
     a parenthetical when it's not fully sure, despite instructions).
 
     Idempotent: re-applied until no pattern matches, so a model that emits

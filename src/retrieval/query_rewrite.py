@@ -29,7 +29,7 @@ Key design choices:
   parse), return an ``ExpandedQuery`` with ``expanded == original`` and
   log a warning. Retrieval keeps working at pre-Plan-A quality; no
   pipeline failure escalates to the user.
-- **Featherless / DeepSeek-V4-Flash.** Same OpenAI-compatible client
+- **Featherless / DeepSeek-V4-Pro.** Same OpenAI-compatible client
   used by ``src/retrieval/generate.py`` — reuses its singleton +
   ``.env`` API-key loading so this module works without extra
   environment setup. Round-trip is ~150–300 ms after warmup.
@@ -49,10 +49,9 @@ from src.retrieval.generate import get_client
 logger = logging.getLogger(__name__)
 
 
-# Module model override. DeepSeek-V4-Flash is markedly faster than the V3
-# agents use elsewhere — query expansion is on the hot path and latency
-# matters more than reasoning depth.
-MODEL = "deepseek-ai/DeepSeek-V4-Flash"
+# DeepSeek-V4-Pro via Featherless — same model used everywhere in the
+# pipeline. Query expansion is on the hot path; round-trip ~150-300ms.
+MODEL = "deepseek-ai/DeepSeek-V4-Pro"
 
 # Temperature: deterministic. The expansion should be reproducible across
 # runs so the eval signal is stable.
@@ -308,7 +307,7 @@ _BARE_KEY_PREFIX_RE = re.compile(r'^\s*([a-zA-Z_]\w*)\s*"\s*:')
 def _parse_with_brace_repair(text: str):
     """JSON parser tolerant of DeepSeek's "missing opening brace" quirks.
 
-    DeepSeek-V4-Flash in JSON mode occasionally returns output like
+    DeepSeek-V4-Pro in JSON mode occasionally returns output like
     ``expanded": "..."}` — both the opening ``{`` and the opening quote
     of the first key are dropped. Less commonly, only ``{`` is missing.
     Try the canonical parsers first; if everything fails, attempt

@@ -17,7 +17,6 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Header } from "@/components/Header";
-import { Footer } from "@/components/Footer";
 import { AnswerStream, RenderedAnswer } from "@/components/AnswerStream";
 import { AgentProgress } from "@/components/AgentProgress";
 import { CitePopover } from "@/components/CitePopover";
@@ -705,7 +704,6 @@ export default function AskPage() {
 
       <CitePopover />
       <Inspector />
-      <Footer />
     </main>
   );
 }
@@ -1168,7 +1166,7 @@ function AskSpecialistModal({
       ? `--- AI DRAFT (low confidence) ---\n${cleanAnswer}\n\n`
       : ``) +
     `Asof: ${turn.asof}\n` +
-    `Lex Atlas Q-ID: ${turn.id}\n\n` +
+    `RAGTAG Q-ID: ${turn.id}\n\n` +
     `Best regards`;
 
   const copy = (text: string, kind: "email" | "subject" | "body") => {

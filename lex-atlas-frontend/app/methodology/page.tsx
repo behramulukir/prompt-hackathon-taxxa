@@ -5,7 +5,6 @@
  */
 
 import { Header } from "@/components/Header";
-import { Footer } from "@/components/Footer";
 
 interface AgentCard {
   number: string;
@@ -101,19 +100,61 @@ export default function MethodologyPage() {
               </span>
             </h1>
             <p className="prose-body-muted">
-              Lex Atlas is built for absolute clarity. This document outlines
-              the foundational pillars of our technical stack, designed for
-              senior auditors and compliance professionals who require
-              uncompromising reliability in data topology and agentic
-              workflows.
+              RAGTAG is built for absolute clarity. This document outlines
+              the foundational pillars of the architecture we initially
+              explored, designed for senior auditors and compliance
+              professionals who require uncompromising reliability in
+              data topology and agentic workflows.
             </p>
+
+            {/* Honest-status banner — this page describes the architecture
+                we *explored* during the hackathon, not the shipping system.
+                The About page covers what actually runs in production. */}
+            <div
+              className="mt-6 flex items-start gap-3 border border-outline-variant bg-surface-container-low"
+              style={{
+                padding: "var(--space-4) var(--space-5)",
+              }}
+              role="note"
+              aria-label="Status notice"
+            >
+              <span
+                className="material-symbols-outlined text-on-surface-variant"
+                style={{ fontSize: "var(--icon-md)", marginTop: 2 }}
+                aria-hidden
+              >
+                info
+              </span>
+              <div>
+                <div
+                  className="font-mono uppercase tracking-widest text-on-surface"
+                  style={{ fontSize: "var(--text-overline)" }}
+                >
+                  Reference only · not what ships
+                </div>
+                <p
+                  className="mt-1 font-sans text-on-surface-variant"
+                  style={{ fontSize: "var(--text-body-sm)", lineHeight: 1.55 }}
+                >
+                  This page describes the architecture we explored during the
+                  hackathon but did <strong>not</strong> end up shipping. See{" "}
+                  <a
+                    href="/about"
+                    className="font-mono text-secondary hover:underline"
+                  >
+                    /about
+                  </a>{" "}
+                  for the system that actually backs <strong>/ask</strong>.
+                </p>
+              </div>
+            </div>
           </div>
         </section>
 
         {/* Chapter 01 — Second Brain */}
         <Chapter num="01" title="The Second Brain" italic="structured topology." insightMarker>
           <p className="mb-4">
-            At the core of Lex Atlas lies a structured topology that acts as a
+            At the core of the explored architecture lies a structured topology that acts as a
             secure, immutable "Second Brain." We eschew flat vector stores in
             favor of a multidimensional semantic network. Every piece of
             legislation, case law, and Vero guidance is mapped not just by
@@ -317,7 +358,7 @@ export default function MethodologyPage() {
               ["€0.005", "Local", "Gemma 3 27B on Ollama, electricity dominant."],
               ["€0.045", "Hosted", "Sonnet drafter on managed inference. 20× under cap."],
               ["€0.20", "Baseline", "Today's stuffed top-k RAG. We send less context."],
-              ["€1.00", "Brief cap", "Lex Atlas lands 22–200× under it."],
+              ["€1.00", "Brief cap", "RAGTAG lands 22–200× under it."],
             ].map(([n, label, body]) => (
               <div
                 key={label}
@@ -396,8 +437,6 @@ export default function MethodologyPage() {
           </div>
         </section>
       </div>
-
-      <Footer />
     </main>
   );
 }

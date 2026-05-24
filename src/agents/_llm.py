@@ -8,7 +8,7 @@ Configuration is read from environment variables (all overridable per-call):
 
     FEATHERLESS_API_KEY   — required at call time, not at import time
     FEATHERLESS_BASE_URL  — default "https://api.featherless.ai/v1"
-    AGENT_MODEL           — default "deepseek-ai/DeepSeek-V3"
+    AGENT_MODEL           — default "deepseek-ai/DeepSeek-V4-Pro"
 
 Each agent module re-imports ``MODEL_DEFAULT`` and may override it via its
 own module-level constant — keep model selection visible per-file.
@@ -26,7 +26,7 @@ from typing import Any
 BASE_URL_DEFAULT = os.environ.get(
     "FEATHERLESS_BASE_URL", "https://api.featherless.ai/v1"
 )
-MODEL_DEFAULT = os.environ.get("AGENT_MODEL", "deepseek-ai/DeepSeek-V3")
+MODEL_DEFAULT = os.environ.get("AGENT_MODEL", "deepseek-ai/DeepSeek-V4-Pro")
 TIMEOUT_S = float(os.environ.get("AGENT_TIMEOUT_S", "60"))
 
 

@@ -31,13 +31,13 @@ const ebGaramond = EB_Garamond({
 });
 
 export const metadata: Metadata = {
-  title: "Lex Atlas · Agentic GraphRAG for Finnish tax law",
+  title: "RAGTAG · Retrieval Augmented Graph Tax Answer Generator",
   description:
-    "Continuous multi-agent retrieval and reasoning over 63,660 Finlex + Vero documents. Aalto Prompt Finance Hackathon · Challenge by Taxxa AI.",
+    "Retrieval Augmented Graph Tax Answer Generator. Multi-agent retrieval and reasoning over Finlex + Vero. Aalto Prompt Finance Hackathon · Challenge by Taxxa AI.",
   metadataBase: new URL(process.env.NEXT_PUBLIC_APP_URL ?? "http://localhost:3000"),
   openGraph: {
-    title: "Lex Atlas",
-    description: "Agentic GraphRAG for Finnish tax law.",
+    title: "RAGTAG",
+    description: "Retrieval Augmented Graph Tax Answer Generator.",
     type: "website",
   },
 };
