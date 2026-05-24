@@ -22,7 +22,18 @@ def normalize_ws(text: str) -> str:
 
 
 def parse_html(raw: str | bytes) -> BeautifulSoup:
-    """Parse with lxml when available, fall back to html.parser."""
+    """Parse with lxml when available, fall back to html.parser.
+
+    Decodes bytes as UTF-8 explicitly before handing off to BeautifulSoup.
+    The Vero corpus's HTML files have no ``<meta charset>`` declaration
+    and start with raw ``<html><body>`` (no ``<!DOCTYPE>``); BeautifulSoup's
+    encoding sniffer would otherwise mis-detect them as Latin-1 and
+    silently produce double-encoded Finnish characters
+    (e.g. ``päätös`` → ``pรครคtรถs``) in every downstream chunk. The whole
+    corpus is verified UTF-8 — assume that and don't sniff.
+    """
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8", errors="replace")
     try:
         return BeautifulSoup(raw, "lxml")
     except Exception:  # pragma: no cover

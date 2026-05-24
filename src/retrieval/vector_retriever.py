@@ -80,9 +80,13 @@ class VectorRetriever:
     Construct once per process. ``retrieve()`` is the hot path.
     """
 
-    def __init__(self, db_path: str | Path) -> None:
+    def __init__(self, db_path: str | Path, hybrid: bool = True) -> None:
         self.db_path = str(db_path)
         self.store = VectorStore(db_path)
+        # ``hybrid`` toggles BM25 + vector RRF fusion. Default True since
+        # Fix B.2 added the FTS index; falls back to pure vector if the
+        # FTS index is missing (search_hybrid degrades gracefully).
+        self.hybrid = hybrid
 
     def retrieve(
         self,
@@ -96,8 +100,17 @@ class VectorRetriever:
         Filters are pushed down into LanceDB's ``where`` clause via the
         adapter; only keys present on ``VectorRecord`` are supported (see
         ``filters.infer_filters``).
+
+        When ``self.hybrid`` is True, retrieval combines dense (cosine)
+        and sparse (BM25) rankings with Reciprocal Rank Fusion — literal
+        Finnish tokens like "ennakonpidätysprosentti" lift documents the
+        embedding alone may not score highly when the question is in
+        English.
         """
-        rows = self.store.search_by_text(query, k=k, filters=filters)
+        if self.hybrid:
+            rows = self.store.search_by_text_hybrid(query, k=k, filters=filters)
+        else:
+            rows = self.store.search_by_text(query, k=k, filters=filters)
         return [_row_to_hit(r, d) for r, d in rows]
 
 

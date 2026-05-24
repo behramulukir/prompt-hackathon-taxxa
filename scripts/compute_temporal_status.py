@@ -168,9 +168,15 @@ def build_law_summaries(conn: sqlite3.Connection, today: date) -> dict[str, LawS
     # We use the edge table here because it carries the per-amendment
     # effective_date in properties_json — the AMENDMENT_BLOCK's own
     # metadata is inherited LAW-root metadata and is not per-amendment.
+    #
+    # We also fold in Fix C's ``backfill_muuttamisesta`` edges — the
+    # slug-inferred ``Laki X muuttamisesta`` → consolidated-LAW edges.
+    # Those targets (ennakkoperintälaki, sairausvakuutuslaki, …) had
+    # zero amendments in the graph before Fix C, so picking them up
+    # here is what flips their children from ``ok`` to ``suspect``.
     cur = conn.execute(
         "SELECT source_id, target_id, type, properties_json "
-        "FROM edges WHERE extracted_by='backfill_amendment'"
+        "FROM edges WHERE extracted_by IN ('backfill_amendment', 'backfill_muuttamisesta')"
     )
     for src, tgt, etype, pj in cur:
         if tgt is None or tgt not in summaries:
@@ -180,7 +186,22 @@ def build_law_summaries(conn: sqlite3.Connection, today: date) -> dict[str, LawS
         s.amendment_count += 1
         if etype == "repeals":
             s.repeal_amendment_count += 1
+        # Prefer the edge's explicit effective_date (Move 1 parses
+        # ``Tämä laki tulee voimaan …`` from each AMENDMENT_BLOCK), then
+        # fall back to the source LAW's own publication_date. Fix C's
+        # slug-inferred edges rarely carry effective_date, but every
+        # amendment-instrument LAW has its own publication_date from
+        # enrich_metadata, which is a good lower-bound proxy for when
+        # the amendment took effect.
         eff = _parse_iso(props.get("effective_date"))
+        if eff is None:
+            src_root = _law_root_of(src)
+            src_summary = summaries.get(src_root)
+            if src_summary is not None:
+                # ``publication_date`` is when the amending act was
+                # enacted; ``effective_date`` is when it took effect.
+                # The latter is more accurate when known.
+                eff = src_summary.effective_date or src_summary.publication_date
         if eff is not None:
             s.amendment_effective_dates.append(eff)
             if s.nearest_amendment_date is None or eff > s.nearest_amendment_date:

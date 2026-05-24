@@ -163,5 +163,109 @@ class VectorStore:
         vec, _ = embed_batch(client, [query_text], input_type="query")
         return self.search(vec[0], k=k, filters=filters)
 
+    # ----- FTS / hybrid path ---------------------------------------------
+
+    def search_fts(
+        self,
+        query_text: str,
+        k: int = 20,
+        filters: dict[str, Any] | None = None,
+    ) -> list[tuple[dict, float]]:
+        """Sparse BM25 search over ``embedded_text``.
+
+        Requires the FTS index built by ``scripts.build_fts_index``.
+        Returns the same shape as ``search()``: ``(row, score)`` pairs.
+        Higher BM25 scores are better (opposite direction from vector
+        distance), but the caller can use the ranking position rather
+        than the score for fusion.
+        """
+        if self.table is None:
+            raise RuntimeError("vector table not created yet")
+        q = self.table.search(query_text, query_type="fts").limit(k)
+        where = _filter_to_where(filters)
+        if where:
+            q = q.where(where, prefilter=True)
+        results = q.to_list()
+        out: list[tuple[dict, float]] = []
+        for row in results:
+            score = row.pop("_score", row.pop("_distance", 0.0))
+            out.append((row, score))
+        return out
+
+    def search_hybrid(
+        self,
+        query_text: str,
+        query_vector: list[float],
+        k: int = 20,
+        filters: dict[str, Any] | None = None,
+        rrf_k: int = 60,
+        oversample: int = 3,
+    ) -> list[tuple[dict, float]]:
+        """Hybrid vector + BM25 search with Reciprocal Rank Fusion (RRF).
+
+        Each backend retrieves ``k * oversample`` candidates; ranks are
+        fused with ``score(d) = sum(1 / (rrf_k + rank))`` over the
+        rankings the candidate appears in. The top ``k`` after fusion
+        are returned.
+
+        ``rrf_k=60`` is the standard RRF constant from Cormack et al.
+        (2009) and is robust to score-scale differences. Falls back to
+        pure vector search when the FTS index is missing (e.g. local
+        clone that hasn't run ``scripts.build_fts_index`` yet).
+        """
+        if self.table is None:
+            raise RuntimeError("vector table not created yet")
+        oversample_k = max(k, k * oversample)
+
+        # Vector ranking — already returns sorted ascending by distance.
+        vec_rows = self.search(query_vector, k=oversample_k, filters=filters)
+
+        # BM25 ranking — may fail if no FTS index exists; degrade gracefully.
+        try:
+            fts_rows = self.search_fts(query_text, k=oversample_k, filters=filters)
+        except Exception:
+            return vec_rows[:k]
+
+        # Reciprocal rank fusion. We key on chunk_id since that's the PK.
+        scores: dict[str, float] = {}
+        first_row: dict[str, dict] = {}
+        for rank, (row, _d) in enumerate(vec_rows):
+            cid = row["chunk_id"]
+            scores[cid] = scores.get(cid, 0.0) + 1.0 / (rrf_k + rank + 1)
+            first_row.setdefault(cid, row)
+        for rank, (row, _s) in enumerate(fts_rows):
+            cid = row["chunk_id"]
+            scores[cid] = scores.get(cid, 0.0) + 1.0 / (rrf_k + rank + 1)
+            first_row.setdefault(cid, row)
+
+        # Sort by fused score desc, take top-k. We re-emit ``_distance``-like
+        # values (1 - fused_score) so downstream cosine-similarity math keeps
+        # working: distance ∈ [0, ~2], smaller = better. The exact value
+        # carries no calibrated meaning beyond ordering — the reranker is
+        # the source of truth for the final score.
+        ranked = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)[:k]
+        out: list[tuple[dict, float]] = []
+        for cid, fused in ranked:
+            # Translate fused score back to a distance-shaped value so
+            # ``_distance_to_similarity`` in vector_retriever stays sane.
+            distance = max(0.0, 1.0 - min(fused * (rrf_k + 1), 1.0))
+            out.append((first_row[cid], distance))
+        return out
+
+    def search_by_text_hybrid(
+        self,
+        query_text: str,
+        k: int = 20,
+        filters: dict[str, Any] | None = None,
+    ) -> list[tuple[dict, float]]:
+        """Embed the query then run hybrid vector + BM25 search.
+
+        Convenience wrapper that mirrors ``search_by_text`` but applies
+        Reciprocal Rank Fusion across both rankings.
+        """
+        client = get_client()
+        vec, _ = embed_batch(client, [query_text], input_type="query")
+        return self.search_hybrid(query_text, vec[0], k=k, filters=filters)
+
     def count(self) -> int:
         return 0 if self.table is None else self.table.count_rows()

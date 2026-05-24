@@ -56,11 +56,17 @@ _HISTORICAL_TRIGGERS = (
 # Source-publisher triggers. Note these gate on the *publisher* (finlex vs
 # vero), not the subcorpus — finer-grained intent (e.g. "give me a Vero ohje")
 # is rare in user queries and best left to the agent layer.
+#
+# Bare ``"law"`` / ``"act"`` were previously here and proved catastrophically
+# ambiguous: "under Finnish **law**" or "an **act** of Parliament" — generic
+# English phrases that mention statutes only incidentally — flipped the
+# filter to ``source=finlex`` and silently excluded every Vero document.
+# The actual Finlex-specific markers are the publisher name and the
+# Finnish vocabulary; English ``statute`` is kept because no one uses it
+# casually. Multi-word ``of law`` / ``the law`` are explicitly excluded.
 _FINLEX_TRIGGERS = (
     "finlex",
     "statute",
-    "law",
-    "act",
     "laki",
     "säädös",
     "asetus",
@@ -68,8 +74,10 @@ _FINLEX_TRIGGERS = (
 _VERO_TRIGGERS = (
     "vero guidance",
     "vero ohje",
+    "vero päätös",
     "tax administration",
     "verohallinto",
+    "verohallinnon päätös",
     "ohje",
     "syventävä",
 )

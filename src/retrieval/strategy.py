@@ -106,6 +106,40 @@ _GUIDANCE_PAT = re.compile(
     re.IGNORECASE,
 )
 
+# Verohallinto / annual-decision marker. Fires on user questions about
+# tax-administration päätökset — those are the cross-source pivot
+# between Finlex framework (ennakkoperintälaki) and the concrete
+# percentages (Verohallinto päätös for a given year). When this pattern
+# alone fires (without an explicit Finlex citation), expand via
+# ``interprets`` so the statutory neighborhood surfaces alongside the
+# päätös chunks.
+#
+# Patterns are tuned to surface päätös documents — both Finnish
+# administrative vocabulary and English "withholding tax" /
+# "tax rate" framings users may ask in English even when the answer is
+# Finnish.
+_PAATOS_PAT = re.compile(
+    r"\b("
+    # Finnish päätös vocabulary
+    r"p[äa][äa]t[öo]s|p[äa][äa]t[öo]ksen|p[äa][äa]t[öo]kset|"
+    r"verohallinnon\s+p[äa][äa]t[öo]s|"
+    r"verohallinto|"
+    r"laskentaperuste(?:et|ist[äa])?|"
+    # Withholding-percentage Finnish + English. Finnish consonant
+    # doubling means the nominative ``ennakonpidätys`` becomes
+    # ``ennakonpidätyks-`` in oblique cases (genitive
+    # ``ennakonpidätyksen``, adessive ``ennakonpidätyksellä``). The
+    # stem ``ennakonpidäty`` matches both forms. The päätös is the
+    # controlling source for any question about rates/thresholds even
+    # when the user does not say the word "päätös" explicitly.
+    r"ennakonpid[äa]ty(?:s|ks)|"
+    r"withholding\s+tax\s+(?:percent|rate|percentage|maximum)|"
+    r"maximum\s+(?:daily\s+)?withholding|"
+    r"tax\s+administration\s+decision"
+    r")",
+    re.IGNORECASE,
+)
+
 _CASE_LAW_PAT = re.compile(
     r"\b(KHO|KVL|tapaus|oikeustapaus|ratkaisu|ennakkoratkaisu|ennakkop[äa][äa]t[öo]s|"
     r"case\s*law|precedent|prejudikaatti)\b",
@@ -127,9 +161,19 @@ _RECENCY_PAT = re.compile(
 
 
 def _is_cross_source(query: str) -> bool:
-    """Cross-source fires only when the query references *both* a Finlex
-    citation form AND a guidance marker. Either alone is too broad."""
-    return bool(_FINLEX_CITE_PAT.search(query)) and bool(_GUIDANCE_PAT.search(query))
+    """Cross-source fires when the query references *both* a Finlex
+    citation form AND a guidance marker, OR when the query explicitly
+    asks about a Verohallinto päätös (annual tax-administration
+    decisions are inherently cross-source: they sit between the statute
+    framework and the year-specific percentages).
+    """
+    if _FINLEX_CITE_PAT.search(query) and _GUIDANCE_PAT.search(query):
+        return True
+    # Päätös-only queries also benefit from CROSS_SOURCE expansion —
+    # the päätös chunks alone don't cite back to the controlling
+    # ennakkoperintälaki sections, but they're connected by inbound
+    # interprets edges.
+    return bool(_PAATOS_PAT.search(query))
 
 
 # ---------------------------------------------------------------------------
