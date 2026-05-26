@@ -1,329 +1,210 @@
-# Taxxa — Finnish legal RAG / GraphRAG
+Rretrieval system for Finnish tax-law research.
 
-Query the Finnish tax-law corpus (Finlex statutes + KHO case law + Vero
-guidance + treaties — 402,088 embedded chunks, 1.97M graph nodes) with one
-of two retrieval pipelines:
+## Results
 
-- **v1** — vector-only baseline (cosine + metadata rerank)
-- **v2** — GraphRAG: strategy router → vector seeds → graph expansion → rerank
+- Winner, Taxxa.ai Challenge, €2,000+ prize
+- Winner, Featherless.ai Challenge
 
-Both share the same answer schema (`AnswerResult`) and the same Finnish
-LLM generation step (DeepSeek-V4-Flash via Featherless).
+## What this is
+
+This repository implements a legal retrieval and answer-generation pipeline for Finnish tax law. It indexes a corpus of Finlex statutes, KHO case law, Vero guidance, and tax treaties into:
+
+- 402,088 embedded chunks
+- 1.97M graph nodes
+- LanceDB vector storage
+- SQLite graph storage
+
+The system compares two retrieval approaches under the same answer schema:
+
+1. `v1`, a vector-only baseline using cosine retrieval and metadata reranking.
+2. `v2`, a GraphRAG pipeline that starts from vector seeds, expands through legal-document relationships, reranks the expanded candidate pool, and returns cited answers.
+
+The main analytical question is simple: can graph expansion recover legally relevant context that plain vector similarity misses. In tax research, the answer often depends on relationships between sources, not just semantic similarity inside one paragraph. Relevant connections include amendments, definitions, case law, Vero guidance, jurisdiction, exceptions, repealed provisions, and conflicting authority.
+
+## System design
+
+| Layer | Role |
+|---|---|
+| Corpus | Finnish tax statutes, KHO case law, Vero guidance, treaties |
+| Chunking | Preserves local legal context while keeping retrieval units small enough for reranking |
+| Vector retrieval | Finds semantically similar chunks from the LanceDB store |
+| Graph retrieval | Expands from seed chunks to connected legal sources in SQLite |
+| Reranking | Uses either metadata scoring or a multilingual cross-encoder |
+| Generation | Produces Finnish legal answers with citations through DeepSeek-V4-Flash via Featherless |
+| Output | Shared `AnswerResult` schema for both v1 and v2 |
+
+## Why GraphRAG
+
+Vector search is useful for finding nearby language. Legal research needs more than nearby language.
+
+A tax question can depend on whether a statute has been amended, whether a Vero guidance page narrows the rule, whether KHO has interpreted it, or whether an exception applies. Those dependencies are structural. The graph layer makes those relationships explicit and lets the retrieval pipeline inspect nearby authority before the answer is generated.
+
+The graph is not used as decoration. It is used to test whether relationship-aware retrieval improves source selection against a vector-only baseline.
+
+## Retrieval modes
+
+| Command | Pipeline | Reranker | Default store |
+|---|---|---|---|
+| `python -m scripts.ask "..."` | v1 vector-only | metadata reranker | `output/lancedb` |
+| `python -m scripts.ask --v2 "..."` | v2 GraphRAG | cross-encoder and weighted combine | `output/lancedb` |
+| `python -m scripts.ask --v2 --rerank vector "..."` | v2 GraphRAG | metadata reranker after graph expansion | `output/lancedb` |
+| `python -m scripts.ask_v1 "..."` | v1 vector-only | metadata reranker | hard-coded full store |
+
+`scripts.ask` is the main entry point. `scripts.ask_v1` is a stable v1 baseline that pins the full store path and avoids config drift.
 
 ## Quick start
 
 ```bash
-# v1, full corpus, default flags
+# v1, vector-only baseline
 .venv/bin/python -m scripts.ask "Mikä on arvonlisäveron vähennysoikeus?"
 
-# v2 / GraphRAG
-.venv/bin/python -m scripts.ask --v2 "..."
-
-# Standalone v1 runner (hard-coded to full store, ignores config flips)
-.venv/bin/python -m scripts.ask_v1 "..."
-```
-
-The first run pulls the cross-encoder model from cache (~1.1 GB at
-`~/.cache/huggingface/`). Set `HF_HUB_OFFLINE=1` to skip the hub
-round-trip when the model is already local.
-
-## The three entry points
-
-| Command                                             | Pipeline           | Reranker                       | Default store          |
-| --------------------------------------------------- | ------------------ | ------------------------------ | ---------------------- |
-| `python -m scripts.ask "..."`                       | v1 (vector-only)   | metadata reranker (v1)         | full (`output/lancedb`)|
-| `python -m scripts.ask --v2 "..."`                  | v2 (GraphRAG)      | cross-encoder + weighted combine | full                 |
-| `python -m scripts.ask --v2 --rerank vector "..."`  | v2 (GraphRAG)      | v1 metadata reranker (post-expand) | full              |
-| `python -m scripts.ask_v1 "..."`                    | v1 (vector-only)   | metadata reranker (v1)         | full (hard-coded)      |
-
-The default store path lives in `src/retrieval/__init__.py:VECTOR_DB_PATH`.
-`scripts.ask_v1` ignores that and pins the path itself, so a config
-revert can't quietly silence it.
-
-## One template per variation
-
-```bash
-# v1 (vector-only) — current default of scripts.ask
-.venv/bin/python -m scripts.ask "Mikä on arvonlisäveron vähennysoikeus?"
-
-# v2 / GraphRAG with cross-encoder rerank (the v2 default)
+# v2, GraphRAG retrieval
 .venv/bin/python -m scripts.ask --v2 "Mikä on arvonlisäveron vähennysoikeus?"
 
-# v2 / GraphRAG with vector-similarity rerank (skip the cross-encoder)
+# v2, GraphRAG retrieval without the cross-encoder
 .venv/bin/python -m scripts.ask --v2 --rerank vector "Mikä on arvonlisäveron vähennysoikeus?"
 
-# v1 standalone — same as scripts.ask but with the full store hard-coded
+# v1 standalone baseline
 .venv/bin/python -m scripts.ask_v1 "Mikä on arvonlisäveron vähennysoikeus?"
 ```
 
-Swap the question, add `--verbose` for diagnostics, or `--json` to feed
-the UI/eval — every variation accepts the same flags.
-
-## Side-by-side: `scripts.ask` vs `scripts.ask_v1`
-
-Both run the same v1 pipeline. The difference is config behavior — `scripts.ask`
-reads `VECTOR_DB_PATH` from `src/retrieval/__init__.py` (can be flipped
-project-wide); `scripts.ask_v1` hard-codes the full store and is immune to
-config drift. Use `scripts.ask_v1` when you want a known-good baseline.
-
-### Plain question
+The first cross-encoder run may load the `BAAI/bge-reranker-v2-m3` model from Hugging Face cache. If the model is already cached, set:
 
 ```bash
-.venv/bin/python -m scripts.ask    "Mikä on pääomatulon verokanta?"
-.venv/bin/python -m scripts.ask_v1 "Mikä on pääomatulon verokanta?"
+export HF_HUB_OFFLINE=1
 ```
 
-### Verbose — filters, top-10 reranked, full context, citations
+## Example comparisons
 
-```bash
-.venv/bin/python -m scripts.ask    --verbose "Onko ALV vähennyskelpoinen edustuskuluista?"
-.venv/bin/python -m scripts.ask_v1 --verbose "Onko ALV vähennyskelpoinen edustuskuluista?"
-```
-
-### JSON output (for the demo UI or eval pipelines)
-
-```bash
-.venv/bin/python -m scripts.ask    --json "Verovapaa lahja perintöverotuksessa" > /tmp/v1a.json
-.venv/bin/python -m scripts.ask_v1 --json "Verovapaa lahja perintöverotuksessa" > /tmp/v1b.json
-
-# They should match (same pipeline, same defaults now that the config is fixed)
-jq -r '.cited_source_ids[]' /tmp/v1a.json
-jq -r '.cited_source_ids[]' /tmp/v1b.json
-```
-
-### Tuning retrieval depth and context size
-
-```bash
-# Wider candidate pool, more sources in the LLM context
-.venv/bin/python -m scripts.ask    -k 50 -n 12 "Yrityksen sukupolvenvaihdoksen veroseuraamukset"
-.venv/bin/python -m scripts.ask_v1 -k 50 -n 12 "Yrityksen sukupolvenvaihdoksen veroseuraamukset"
-
-# Smoke test with tiny context
-.venv/bin/python -m scripts.ask    -k 5 -n 3 "..."
-.venv/bin/python -m scripts.ask_v1 -k 5 -n 3 "..."
-```
-
-### Switching stores
-
-```bash
-# Both can be pointed at the pilot for a fast smoke run
-.venv/bin/python -m scripts.ask    --db output/lancedb_pilot "..."
-.venv/bin/python -m scripts.ask_v1 --db output/lancedb_pilot "..."
-
-# Or at the full store explicitly
-.venv/bin/python -m scripts.ask    --db output/lancedb "..."
-.venv/bin/python -m scripts.ask_v1 --db output/lancedb "..."
-```
-
-### Different graph store path
-
-```bash
-.venv/bin/python -m scripts.ask    --graph-db /path/to/other.db "..."
-.venv/bin/python -m scripts.ask_v1 --graph-db /path/to/other.db "..."
-```
-
-### Convenience: an English-tax-glossary mini sweep
-
-```bash
-for Q in \
-  "What is the Finnish capital gains tax rate?" \
-  "Mikä on perintöveron veroluokka?" \
-  "Define permanent establishment in Finnish tax law" \
-  "Yleishyödyllisen yhteisön verovapauden edellytykset"
-do
-  echo "=== $Q (scripts.ask) ==="
-  .venv/bin/python -m scripts.ask --json "$Q" | jq -r '.answer'
-  echo "=== $Q (scripts.ask_v1) ==="
-  .venv/bin/python -m scripts.ask_v1 --json "$Q" | jq -r '.answer'
-done
-```
-
----
-
-## v2 / GraphRAG examples (only `scripts.ask` supports `--v2`)
-
-`scripts.ask_v1` is v1-only by design — to use the graph-expansion
-pipeline, run `scripts.ask --v2`.
-
-### 1. Basic Finnish tax question (v1, vector-only)
-
-```bash
-.venv/bin/python -m scripts.ask "Mikä on pääomatulon verokanta?"
-```
-
-Output: answer with `[Source N]` citations, the actual chunk_ids cited,
-applied filters, per-stage timing.
-
-### 2. Same question via v2 GraphRAG with cross-encoder
-
-```bash
-.venv/bin/python -m scripts.ask --v2 "Mikä on pääomatulon verokanta?"
-```
-
-v2 adds graph expansion (`pick_strategy → expand → cross-encoder rerank`)
-on top of the v1 retrieval seeds. Default rerank is the multilingual
-`BAAI/bge-reranker-v2-m3` cross-encoder.
-
-### 3. v2 GraphRAG with vector-similarity rerank (no cross-encoder)
-
-```bash
-.venv/bin/python -m scripts.ask --v2 --rerank vector "..."
-```
-
-Same graph expansion, but skips the cross-encoder. Every candidate
-(seeds + graph-expanded) is rescored with v1's full metadata reranker
-(cosine + authority + recency + term bonus − repealed penalty). Useful
-to isolate whether the cross-encoder is helping or hurting.
-
-### 4. Verbose mode — see filters, reranked top-10, assembled context
-
-```bash
-.venv/bin/python -m scripts.ask --verbose "..."
-.venv/bin/python -m scripts.ask --v2 --verbose "..."
-.venv/bin/python -m scripts.ask --v2 --rerank vector --verbose "..."
-```
-
-For v2, verbose also shows the picked strategy and graph expansion stats
-(seeds → BFS reach → fetched chunks → final candidate pool).
-
-### 5. JSON output (for the demo UI or eval harness)
-
-```bash
-.venv/bin/python -m scripts.ask --json "..." > result.json
-.venv/bin/python -m scripts.ask --v2 --json "..." > result_v2.json
-```
-
-Emits the full `AnswerResult` schema — `answer`, `cited_source_ids`,
-`retrieved_chunks`, `retrieval_paths`, `assumptions`, `timing_ms`,
-`conflicts`.
-
-### 6. Side-by-side compare — v1 vs v2 modes on one question
+### Compare v1 against v2
 
 ```bash
 Q="KHO ratkaisu arvonlisäveron vähennysoikeudesta"
 
-echo "=== v1 ==="
-.venv/bin/python -m scripts.ask                           "$Q"
-
-echo "=== v2 cross-encoder ==="
-.venv/bin/python -m scripts.ask --v2 --rerank cross_encoder "$Q"
-
-echo "=== v2 vector-only rerank ==="
-.venv/bin/python -m scripts.ask --v2 --rerank vector       "$Q"
+.venv/bin/python -m scripts.ask "$Q"
+.venv/bin/python -m scripts.ask --v2 "$Q"
+.venv/bin/python -m scripts.ask --v2 --rerank vector "$Q"
 ```
 
-Diff the `cited_source_ids` (with `--json | jq`) to spot regressions.
-
-### 7. Each routing strategy in v2 (so you can see different graph behaviors)
+### Compare cited sources as JSON
 
 ```bash
-# case_law — triggers on KHO / KVL / "tapaus" / "ennakkoratkaisu"
+.venv/bin/python -m scripts.ask --json "$Q" > /tmp/v1.json
+.venv/bin/python -m scripts.ask --v2 --json "$Q" > /tmp/v2.json
+
+jq -r '.cited_source_ids[]' /tmp/v1.json
+jq -r '.cited_source_ids[]' /tmp/v2.json
+```
+
+### Inspect retrieval behavior
+
+```bash
+.venv/bin/python -m scripts.ask --verbose "Onko ALV vähennyskelpoinen edustuskuluista?"
+.venv/bin/python -m scripts.ask --v2 --verbose "Onko ALV vähennyskelpoinen edustuskuluista?"
+```
+
+Verbose mode shows filters, top reranked chunks, assembled context, citations, and timing. In v2, it also shows the selected strategy and graph expansion statistics.
+
+## v2 routing strategies
+
+The v2 router selects a retrieval strategy from the question text. Each strategy changes how graph expansion is used.
+
+| Strategy | Typical trigger | Retrieval behavior |
+|---|---|---|
+| `case_law` | KHO, KVL, case references | Expands toward related rulings and legal authority |
+| `definition` | definition questions | Expands toward definitional sources and referenced provisions |
+| `multi_hop` | exceptions, conditions, however-style questions | Expands across linked rules and qualifications |
+| `recency` | current, repealed, still valid | Prioritizes validity and time-sensitive relationships |
+| `cross_source` | statute plus guidance questions | Connects Finlex-style authority with Vero guidance |
+| default | no strong trigger | Reranks vector seeds with limited graph involvement |
+
+Examples:
+
+```bash
 .venv/bin/python -m scripts.ask --v2 --verbose "KHO ratkaisu osakeyhtiön sukupolvenvaihdoksesta"
-
-# definition — triggers on "määritelmä" / "tarkoittaa"
 .venv/bin/python -m scripts.ask --v2 --verbose "Mitä tarkoittaa kiinteä toimipaikka verotuksessa?"
-
-# multi_hop — triggers on "poikkeus" / "kuitenkin" / "however"
 .venv/bin/python -m scripts.ask --v2 --verbose "Arvonlisäveron vähennysoikeuden poikkeukset"
-
-# recency — triggers on "voimassa" / "kumottu" / "current"
 .venv/bin/python -m scripts.ask --v2 --verbose "Onko tämä laki yhä voimassa?"
-
-# cross_source — triggers on Finlex citation + guidance marker co-occurrence
 .venv/bin/python -m scripts.ask --v2 --verbose "Vero-ohje tuloverolain 28 § soveltamisesta"
-
-# default (no trigger) — v2 still runs cross-encoder over vector seeds, no graph walk
-.venv/bin/python -m scripts.ask --v2 --verbose "Pääomatulon verokanta yli 30000 euron tuloista"
 ```
 
-### 8. Override the vector store (e.g. quick smoke test against the pilot)
+## Output schema
 
-```bash
-# Pilot (1000 chunks, ~0.25 % of corpus — quick but limited)
-.venv/bin/python -m scripts.ask --db output/lancedb_pilot "..."
+Both pipelines return the same `AnswerResult` structure. This makes v1 and v2 easier to compare in the UI, evaluation scripts, and manual inspections.
 
-# Explicit full store
-.venv/bin/python -m scripts.ask --db output/lancedb "..."
+Core fields:
 
-# scripts.ask_v1 ignores --db default flips; pass --db to override its hard-coded default
-.venv/bin/python -m scripts.ask_v1 --db output/lancedb_pilot "..."
-```
+- `answer`
+- `cited_source_ids`
+- `retrieved_chunks`
+- `retrieval_paths`
+- `assumptions`
+- `timing_ms`
+- `conflicts`
 
-### 9. Tuning the v1 pipeline
+## CLI reference
 
-```bash
-# Wider candidate pool, more sources in the LLM context
-.venv/bin/python -m scripts.ask -k 50 -n 12 "..."
-```
-
-`-k` is the vector retrieval depth (default 20). `-n` is how many
-deduped-by-section sources end up in the LLM context (default 8).
-
-In v2 `-k` is ignored — the strategy's `seed_k` controls vector depth
-instead (10 by default per strategy in `src/retrieval/strategy.py`).
-
-### 10. Force a specific v2 strategy from Python (ablation)
-
-```bash
-.venv/bin/python - <<'PY'
-from src.retrieval.pipeline_v2 import answer_v2
-from src.retrieval.strategy import MULTI_HOP, CASE_LAW, DEFINITION, CROSS_SOURCE, RECENCY
-
-r = answer_v2(
-    "your question",
-    vector_db_path="output/lancedb",
-    rerank_mode="vector",                  # or "cross_encoder"
-    strategy_override=CASE_LAW,            # bypass the keyword router
-)
-print(r.answer)
-print("strategy:", r.assumptions[0])
-print("timing:", r.timing_ms)
-PY
-```
-
-## Flag reference
-
-### `scripts.ask` (both v1 and v2)
+### `scripts.ask`
 
 | Flag | Default | Description |
-|------|---------|-------------|
-| `question` (positional) | — | The question (Finnish or English) |
-| `--v2` | off | Use the v2 GraphRAG pipeline |
-| `--rerank {cross_encoder,vector}` | `cross_encoder` | v2 reranker mode (ignored for v1) |
-| `--db PATH` | from `src/retrieval/__init__.py` | LanceDB directory |
+|---|---|---|
+| `question` | required | Finnish or English tax-law question |
+| `--v2` | off | Use the GraphRAG pipeline |
+| `--rerank {cross_encoder,vector}` | `cross_encoder` | Reranker for v2 |
+| `--db PATH` | `src/retrieval/__init__.py:VECTOR_DB_PATH` | LanceDB directory |
 | `--graph-db PATH` | `output/graph.db` | SQLite graph store |
-| `-k N` | 20 | v1 vector retrieval depth (v2 uses strategy.seed_k) |
-| `-n N` | 8 | Sources assembled into LLM context |
-| `--verbose`, `-v` | off | Show filters, reranked hits, full context, citations |
-| `--json` | off | Emit the `AnswerResult` as JSON |
+| `-k N` | 20 | Vector retrieval depth for v1 |
+| `-n N` | 8 | Number of deduplicated sources sent to the LLM |
+| `--verbose`, `-v` | off | Print retrieval diagnostics |
+| `--json` | off | Emit the full `AnswerResult` as JSON |
 
-### `scripts.ask_v1` (v1 only, standalone)
+### `scripts.ask_v1`
 
 | Flag | Default | Description |
-|------|---------|-------------|
-| `question` (positional) | — | The question (Finnish or English) |
-| `--db PATH` | `output/lancedb` (hard-coded) | LanceDB directory |
+|---|---|---|
+| `question` | required | Finnish or English tax-law question |
+| `--db PATH` | `output/lancedb` | LanceDB directory |
 | `--graph-db PATH` | `output/graph.db` | SQLite graph store |
 | `-k N` | 20 | Vector retrieval depth |
-| `-n N` | 8 | Sources assembled into LLM context |
-| `--verbose`, `-v` | off | Show filters, reranked hits, full context, citations |
-| `--json` | off | Emit the `AnswerResult` as JSON |
+| `-n N` | 8 | Number of deduplicated sources sent to the LLM |
+| `--verbose`, `-v` | off | Print retrieval diagnostics |
+| `--json` | off | Emit the full `AnswerResult` as JSON |
+
+In v2, `-k` is ignored. The selected strategy controls seed depth through `strategy.seed_k`.
 
 ## Environment
 
-```bash
-# Required keys live in .env at the project root (already gitignored)
-VOYAGE_API_KEY=...        # embeddings + query encoding
-FEATHERLESS_API_KEY=...   # DeepSeek-V4-Flash for generation
+Create a `.env` file at the project root:
 
-# Optional: skip HuggingFace hub round-trips when the cross-encoder model is cached
+```bash
+VOYAGE_API_KEY=...        # embeddings and query encoding
+FEATHERLESS_API_KEY=...   # DeepSeek-V4-Flash generation
+```
+
+Optional:
+
+```bash
 export HF_HUB_OFFLINE=1
 ```
 
-## Where to go deeper
+## Development notes
 
-- `our-docs/changelog/` — per-step build journals
-- `our-docs/05_retrieval_v1_vector_only.md` — v1 spec
-- `our-docs/07_retrieval_v2_graph_traversal.md` — v2 / GraphRAG spec
-- `src/retrieval/` — pipeline implementation
-- `findings/` — pilot results, baseline failures, sanity reports
+Useful project paths:
+
+- `src/retrieval/`, retrieval implementation
+- `our-docs/05_retrieval_v1_vector_only.md`, v1 design notes
+- `our-docs/07_retrieval_v2_graph_traversal.md`, v2 GraphRAG design notes
+- `our-docs/changelog/`, build logs and design changes
+- `findings/`, pilot results, baseline failures, sanity checks
+
+## Analytical focus
+
+This project is built around controlled comparison rather than a single demo path. The important comparisons are:
+
+- vector-only retrieval against graph-expanded retrieval
+- metadata reranking against cross-encoder reranking
+- source coverage before and after graph expansion
+- cited-source stability across repeated legal questions
+- latency and cost implications of each retrieval stage
+
+That makes the system useful both as a product prototype and as an empirical test of GraphRAG for Finnish tax-law research.
