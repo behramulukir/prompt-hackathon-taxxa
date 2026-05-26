@@ -1,5 +1,7 @@
 Rretrieval system for Finnish tax-law research.
 
+<img width="1878" height="956" alt="image" src="https://github.com/user-attachments/assets/a7344922-3979-486f-88e2-5d4ec3354671" />
+
 ## Results
 
 - Winner, Taxxa.ai Challenge, €2,000+ prize
